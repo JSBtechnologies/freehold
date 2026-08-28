@@ -56,6 +56,7 @@
       <b>no key inside</b>. Import it on device B, then unlock there with the same synced passkey
       (tests PRF stability) or the recovery code (works anywhere by construction).
     </p>
+    <button id="addNote" disabled>Add data (new version)</button>
     <button id="exportBundle" disabled>Export bundle (download)</button>
     <label for="importFile" class="muted" style="cursor:pointer; border:1px solid #33477e; border-radius:8px; padding:8px 13px; display:inline-block;">Import bundle…</label>
     <input id="importFile" type="file" accept="application/json,.json" style="display:none" />
@@ -145,8 +146,17 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
       const has = !!localStorage.getItem(LS_BLOB);
       $('unlock').disabled = !has; $('addRecovery').disabled = !has;
       $('addPasskey').disabled = !has; $('unlockRecovery').disabled = !has;
-      $('exportBundle').disabled = !has;
+      $('exportBundle').disabled = !has; $('addNote').disabled = !has;
     }
+
+    $('addNote').onclick = async () => {
+      try {
+        log('Approve your passkey to add a note (advances the DB version)…');
+        const { prf } = await getPrf(currentCredId());
+        const r = await call({ type: 'add_note', prf: buf(prf), blob: localStorage.getItem(LS_BLOB), epoch: localStorage.getItem(LS_EPOCH) || '' }, []);
+        log(r.msg, 'ok');
+      } catch (e) { log('Add data failed: ' + (e.message || e), 'err'); }
+    };
 
     $('exportBundle').onclick = async () => {
       try {

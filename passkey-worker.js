@@ -3,7 +3,7 @@
 // recovery codes and runs the envelope + encrypted-DB ops in wasm. Header-free: no COOP/COEP.
 import init, {
   enroll, unlock, gen_recovery, add_recovery, add_passkey, remove_method, list_methods, unlock_recovery,
-  export_db, import_db_image,
+  export_db, import_db_image, add_note,
 } from './pkg/enc_sahpool.js';
 
 let ready = false;
@@ -25,6 +25,7 @@ self.onmessage = async (e) => {
       case 'remove_method':   result = { blobHex: remove_method(m.kekId, m.blob) }; break;
       case 'list_methods':    result = { methods: list_methods(m.blob) }; break;
       case 'unlock_recovery': result = { secret: await unlock_recovery(m.code, m.blob, m.epoch || '') }; break;
+      case 'add_note':        result = { msg: await add_note(prf, m.blob, m.epoch || '') }; break;
       case 'export_db':       result = { bundle: await export_db(prf, m.blob) }; break;
       case 'import_db_image':  result = { epochHex: await import_db_image(m.bundle) }; break;
       default: throw new Error('unknown message type: ' + m.type);

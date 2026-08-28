@@ -914,6 +914,35 @@ pub async fn unlock_recovery(code: &str, blob_hex: &str, epoch_hex: &str) -> Res
 // touches the block-device crypto. The image only decrypts later under the real DEK (passkey/recovery).
 const DUMMY_DEK: [u8; 32] = [0u8; 32];
 
+/// Add a row to the demo DB (advances db_generation) so you can create a v1/v2 pair for the live
+/// two-device rollback test. Applies any peer epoch first, then commits a new note.
+#[wasm_bindgen]
+pub async fn add_note(prf: &[u8], blob_hex: &str, epoch_hex: &str) -> Result<String, JsValue> {
+    console_error_panic_hook::set_once();
+    let blob = hex_to_bytes(blob_hex).map_err(|e| JsValue::from_str(&e))?;
+    let dek = envelope::open_with_prf(&blob, prf)
+        .map_err(|_| JsValue::from_str("unlock failed — cannot add data"))?;
+    let util = vfs::install::<ffi::WasmOsCallback>(&demo_cfg("pk-note", false), true, &dek)
+        .await
+        .map_err(|e| JsValue::from_str(&format!("install: {e:?}")))?;
+    if !epoch_hex.is_empty() {
+        let token = hex_to_bytes(epoch_hex).map_err(|e| JsValue::from_str(&e))?;
+        util.apply_epoch(&token).map_err(|e| JsValue::from_str(&format!("apply_epoch: {e:?}")))?;
+    }
+    let n = unsafe {
+        let db = open_default(DEMO_DB).map_err(|e| JsValue::from_str(&format!("open: {e}")))?;
+        set_pragmas(db).map_err(|e| JsValue::from_str(&e))?;
+        exec(db, "CREATE TABLE IF NOT EXISTS secret(v TEXT)").map_err(|e| JsValue::from_str(&e))?;
+        exec(db, "INSERT INTO secret(v) VALUES ('note @ ' || datetime('now'))")
+            .map_err(|e| JsValue::from_str(&e))?;
+        let n = scalar_i64(db, "SELECT count(*) FROM secret").unwrap_or(0);
+        ffi::sqlite3_close(db);
+        n
+    };
+    util.pause_vfs().map_err(|e| JsValue::from_str(&format!("pause: {e:?}")))?;
+    Ok(format!("added a note (DB now has {n} rows — a newer version). Export a fresh bundle."))
+}
+
 /// Export the demo DB's encrypted image PLUS a sync-epoch token (`#epoch|<hex>` line). The image is
 /// DEK-free; the epoch token is DEK-authenticated freshness. Needs the passkey PRF to mint the epoch.
 #[wasm_bindgen]

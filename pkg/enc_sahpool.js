@@ -1,6 +1,25 @@
 /* @ts-self-types="./enc_sahpool.d.ts" */
 
 /**
+ * Add a row to the demo DB (advances db_generation) so you can create a v1/v2 pair for the live
+ * two-device rollback test. Applies any peer epoch first, then commits a new note.
+ * @param {Uint8Array} prf
+ * @param {string} blob_hex
+ * @param {string} epoch_hex
+ * @returns {Promise<string>}
+ */
+export function add_note(prf, blob_hex, epoch_hex) {
+    const ptr0 = passArray8ToWasm0(prf, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(blob_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passStringToWasm0(epoch_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.add_note(ptr0, len0, ptr1, len1, ptr2, len2);
+    return ret;
+}
+
+/**
  * Add a second passkey method: unlock with the existing PRF, wrap the DEK under the new PRF.
  * @param {Uint8Array} existing_prf
  * @param {Uint8Array} new_prf
@@ -604,7 +623,7 @@ function __wbg_get_imports() {
             return ret;
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 678, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 681, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__ha22148a4a7c1d5ff);
             return ret;
         },

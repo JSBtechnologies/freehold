@@ -1,6 +1,7 @@
 /* tslint:disable */
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
+export const add_note: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
 export const add_passkey: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const add_recovery: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const enroll: (a: number, b: number) => any;

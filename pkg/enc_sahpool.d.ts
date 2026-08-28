@@ -2,6 +2,12 @@
 /* eslint-disable */
 
 /**
+ * Add a row to the demo DB (advances db_generation) so you can create a v1/v2 pair for the live
+ * two-device rollback test. Applies any peer epoch first, then commits a new note.
+ */
+export function add_note(prf: Uint8Array, blob_hex: string, epoch_hex: string): Promise<string>;
+
+/**
  * Add a second passkey method: unlock with the existing PRF, wrap the DEK under the new PRF.
  */
 export function add_passkey(existing_prf: Uint8Array, new_prf: Uint8Array, blob_hex: string): string;
@@ -63,6 +69,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly add_note: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
     readonly add_passkey: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly add_recovery: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly enroll: (a: number, b: number) => any;
