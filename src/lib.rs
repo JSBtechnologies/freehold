@@ -197,6 +197,93 @@ unsafe fn count_rows() -> std::result::Result<i64, String> {
     n
 }
 
+fn dir_cfg(vfs_name: &str, dir: &str, clear: bool) -> vfs::OpfsSAHPoolCfg {
+    OpfsSAHPoolCfgBuilder::new()
+        .vfs_name(vfs_name)
+        .directory(dir)
+        .clear_on_init(clear)
+        .initial_capacity(6)
+        .build()
+}
+async fn install_dir(
+    vfs_name: &str,
+    dir: &str,
+    clear: bool,
+    dek: &[u8; 32],
+) -> std::result::Result<OpfsSAHPoolUtil, String> {
+    vfs::install::<ffi::WasmOsCallback>(&dir_cfg(vfs_name, dir, clear), true, dek)
+        .await
+        .map_err(|e| format!("install {vfs_name}: {e:?}"))
+}
+
+/// Sync-epoch anchor test (sync-epoch-design §6): a peer's epoch raises this device's freshness
+/// high-water mark, so a later rollback below it is REFUSED — and the contrast device (no epoch)
+/// shows the rollback would otherwise slip through. Two "devices" = two independent pool dirs.
+async fn sync_epoch_test() -> std::result::Result<String, String> {
+    const SDB: &str = "sync.db";
+    // ---- Device A: commit to a high generation; snapshot an EARLY (stale) image + a LATE epoch ----
+    let a = install_dir("se-a", "epoch-a", true, &DEK_OK).await?;
+    let (img_early, epoch_late) = unsafe {
+        let db = open_default(SDB)?;
+        set_pragmas(db)?;
+        exec(db, "CREATE TABLE t(v TEXT)")?;
+        exec(db, "INSERT INTO t(v) VALUES ('one')")?;
+        ffi::sqlite3_close(db);
+        let early = a.export_bundle(SDB).map_err(|e| format!("export early: {e:?}"))?; // low gen
+        let db = open_default(SDB)?;
+        exec(db, "INSERT INTO t(v) VALUES ('two'),('three')")?; // advance the generation
+        ffi::sqlite3_close(db);
+        let ep = a.export_epoch(SDB).map_err(|e| format!("export epoch: {e:?}"))?; // attests the HIGH gen
+        (early, ep)
+    };
+    let gen_a = a.manifest_generation(SDB).unwrap_or(0);
+    a.pause_vfs().map_err(|e| format!("pause A: {e:?}"))?;
+
+    // ---- Device B: apply A's LATE epoch, then be handed only the STALE image. B never saw the fresh
+    // state — the peer epoch is the ONLY reason it knows the import is a rollback. Must be REJECTED. --
+    let b = install_dir("se-b", "epoch-b", true, &DEK_OK).await?;
+    let seen = b.apply_epoch(&epoch_late).map_err(|e| format!("B apply epoch: {e:?}"))?;
+    b.import_bundle(&img_early).map_err(|e| format!("B import early: {e:?}"))?;
+    let rolled_back_rejected = unsafe {
+        match open_default(SDB) {
+            Err(_) => true,
+            Ok(db) => {
+                let got = scalar_i64(db, "SELECT count(*) FROM t");
+                ffi::sqlite3_close(db);
+                got.is_err()
+            }
+        }
+    };
+    b.pause_vfs().map_err(|e| format!("pause B: {e:?}"))?;
+
+    // ---- Device C (contrast): SAME stale image, but NO epoch applied → opens (rollback NOT caught) --
+    let c = install_dir("se-c", "epoch-c", true, &DEK_OK).await?;
+    c.import_bundle(&img_early).map_err(|e| format!("C import early: {e:?}"))?;
+    let contrast_opens = unsafe {
+        match open_default(SDB) {
+            Ok(db) => {
+                let ok = scalar_i64(db, "SELECT count(*) FROM t").is_ok();
+                ffi::sqlite3_close(db);
+                ok
+            }
+            Err(_) => false,
+        }
+    };
+    c.pause_vfs().map_err(|e| format!("pause C: {e:?}"))?;
+
+    if !rolled_back_rejected {
+        return Err("SYNC-EPOCH FAILED: B accepted a stale image below a peer-attested epoch!".into());
+    }
+    if !contrast_opens {
+        return Err("SYNC-EPOCH inconclusive: contrast device C did not open the stale image".into());
+    }
+    Ok(format!(
+        "SE. sync-epoch anchor: A commits to gen {gen_a} and attests epoch={seen}; B (which never saw \
+the fresh state) applies the peer epoch then is fed the STALE image → open REJECTED; contrast device \
+with NO epoch opens the same stale image → the peer epoch is exactly what prevents the rollback \u{2705}"
+    ))
+}
+
 async fn run() -> std::result::Result<String, String> {
     let mut r = String::new();
     r.push_str("enc-sahpool Milestones 2+3 — anti-rollback + hardening + crash-injection/perf tests\n");
@@ -619,6 +706,10 @@ async fn run() -> std::result::Result<String, String> {
         return Err("crossOriginIsolated is true — not header-free".into());
     }
 
+    // ---- Sync-epoch anchor (peer-attested rollback prevention) ---------------------------------
+    r.push_str(&sync_epoch_test().await?);
+    r.push('\n');
+
     r.push_str("\nALL MILESTONE-2+3 CHECKS PASSED.\n");
     Ok(r)
 }
@@ -674,19 +765,22 @@ async fn enroll_inner(prf: &[u8]) -> std::result::Result<String, String> {
     Ok(blob.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-async fn unlock_inner(prf: &[u8], blob_hex: &str) -> std::result::Result<String, String> {
-    let blob = (0..blob_hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&blob_hex[i..i + 2], 16).map_err(|_| "bad blob hex".to_string()))
-        .collect::<std::result::Result<Vec<u8>, _>>()?;
+async fn unlock_inner(prf: &[u8], blob_hex: &str, epoch_hex: &str) -> std::result::Result<String, String> {
+    let blob = hex_to_bytes(blob_hex)?;
     let dek = envelope::open_with_prf(&blob, prf)
         .map_err(|_| "unlock failed — wrong passkey, wrong PRF/UV state, or tampered envelope".to_string())?;
 
     let util = vfs::install::<ffi::WasmOsCallback>(&demo_cfg("pk-unlock", false), true, &dek)
         .await
         .map_err(|e| format!("install: {e:?}"))?;
+    // sync-epoch: apply any peer epoch BEFORE opening so a rollback below it is refused at open.
+    if !epoch_hex.is_empty() {
+        let token = hex_to_bytes(epoch_hex)?;
+        util.apply_epoch(&token).map_err(|e| format!("apply_epoch: {e:?}"))?;
+    }
     let row = unsafe {
-        let db = open_default(DEMO_DB).map_err(|e| format!("open (DEK from envelope): {e}"))?;
+        let db = open_default(DEMO_DB)
+            .map_err(|e| format!("open rejected (rollback below a peer epoch, or wrong key): {e}"))?;
         set_pragmas(db)?;
         let v = scalar_text(db, "SELECT v FROM secret ORDER BY rowid LIMIT 1")?;
         ffi::sqlite3_close(db);
@@ -703,11 +797,12 @@ pub async fn enroll(prf: &[u8]) -> Result<String, JsValue> {
     enroll_inner(prf).await.map_err(|e| JsValue::from_str(&e))
 }
 
-/// Unlock: unwrap the DEK from `blob_hex` using the PRF output, open the DB, return the secret row.
+/// Unlock: apply any peer `epoch_hex` (freshness), unwrap the DEK via the PRF, open the DB, return
+/// the secret row. Pass "" for epoch_hex when there's no peer epoch to apply.
 #[wasm_bindgen]
-pub async fn unlock(prf: &[u8], blob_hex: &str) -> Result<String, JsValue> {
+pub async fn unlock(prf: &[u8], blob_hex: &str, epoch_hex: &str) -> Result<String, JsValue> {
     console_error_panic_hook::set_once();
-    unlock_inner(prf, blob_hex).await.map_err(|e| JsValue::from_str(&e))
+    unlock_inner(prf, blob_hex, epoch_hex).await.map_err(|e| JsValue::from_str(&e))
 }
 
 // ---- M3: N-KEK envelope management (pure re-wrap ops — no DB re-encryption) ----
@@ -790,18 +885,18 @@ pub fn list_methods(blob_hex: &str) -> Result<String, JsValue> {
 /// Unlock with the recovery code instead of a passkey: derive the Argon2id KEK, unwrap the DEK,
 /// open the DB, return the secret row.
 #[wasm_bindgen]
-pub async fn unlock_recovery(code: &str, blob_hex: &str) -> Result<String, JsValue> {
+pub async fn unlock_recovery(code: &str, blob_hex: &str, epoch_hex: &str) -> Result<String, JsValue> {
     console_error_panic_hook::set_once();
-    let go = || -> std::result::Result<Vec<u8>, String> {
-        let blob = hex_to_bytes(blob_hex)?;
-        Ok(blob)
-    };
-    let blob = go().map_err(|e| JsValue::from_str(&e))?;
+    let blob = hex_to_bytes(blob_hex).map_err(|e| JsValue::from_str(&e))?;
     let dek = envelope::open_with_recovery(&blob, code)
         .map_err(|_| JsValue::from_str("recovery code did not unlock — wrong code or tampered envelope"))?;
     let util = vfs::install::<ffi::WasmOsCallback>(&demo_cfg("pk-recover", false), true, &dek)
         .await
         .map_err(|e| JsValue::from_str(&format!("install: {e:?}")))?;
+    if !epoch_hex.is_empty() {
+        let token = hex_to_bytes(epoch_hex).map_err(|e| JsValue::from_str(&e))?;
+        util.apply_epoch(&token).map_err(|e| JsValue::from_str(&format!("apply_epoch: {e:?}")))?;
+    }
     let row = unsafe {
         let db = open_default(DEMO_DB).map_err(|e| JsValue::from_str(&format!("open: {e}")))?;
         let _ = set_pragmas(db);
@@ -819,32 +914,60 @@ pub async fn unlock_recovery(code: &str, blob_hex: &str) -> Result<String, JsVal
 // touches the block-device crypto. The image only decrypts later under the real DEK (passkey/recovery).
 const DUMMY_DEK: [u8; 32] = [0u8; 32];
 
-/// Export the demo DB's encrypted image as a `name|hex` bundle (DEK-free; safe to carry anywhere).
+/// Export the demo DB's encrypted image PLUS a sync-epoch token (`#epoch|<hex>` line). The image is
+/// DEK-free; the epoch token is DEK-authenticated freshness. Needs the passkey PRF to mint the epoch.
 #[wasm_bindgen]
-pub async fn export_db() -> Result<String, JsValue> {
+pub async fn export_db(prf: &[u8], blob_hex: &str) -> Result<String, JsValue> {
     console_error_panic_hook::set_once();
-    let util = vfs::install::<ffi::WasmOsCallback>(&demo_cfg("pk-export", false), true, &DUMMY_DEK)
+    let go = || -> std::result::Result<Vec<u8>, String> {
+        let blob = hex_to_bytes(blob_hex)?;
+        let dek = envelope::open_with_prf(&blob, prf)
+            .map_err(|_| "unlock failed — cannot mint a freshness epoch for export".to_string())?;
+        Ok(dek.as_slice().to_vec())
+    };
+    let dek_v = go().map_err(|e| JsValue::from_str(&e))?;
+    let mut dek = [0u8; 32];
+    dek.copy_from_slice(&dek_v);
+    let util = vfs::install::<ffi::WasmOsCallback>(&demo_cfg("pk-export", false), true, &dek)
         .await
         .map_err(|e| JsValue::from_str(&format!("install: {e:?}")))?;
-    let bundle = util
+    let mut bundle = util
         .export_bundle(DEMO_DB)
         .map_err(|e| JsValue::from_str(&format!("export: {e:?}")))?;
+    let epoch = util
+        .export_epoch(DEMO_DB)
+        .map_err(|e| JsValue::from_str(&format!("export_epoch: {e:?}")))?;
     util.pause_vfs().map_err(|e| JsValue::from_str(&format!("pause: {e:?}")))?;
     if bundle.is_empty() {
         return Err(JsValue::from_str("nothing to export — enroll and create the DB first"));
     }
+    bundle.push_str("#epoch|");
+    bundle.push_str(&bytes_to_hex(&epoch));
+    bundle.push('\n');
     Ok(bundle)
 }
 
-/// Import an encrypted DB image (from `export_db` on another device) into this device's OPFS.
+/// Import an encrypted DB image (from `export_db`). Writes the ciphertext files and RETURNS the
+/// peer's epoch token (hex) — the caller stores it and passes it to `unlock`, which applies it
+/// (a stale image below that epoch is then refused at open). Empty string if the bundle had no epoch.
 #[wasm_bindgen]
-pub async fn import_db_image(bundle: &str) -> Result<(), JsValue> {
+pub async fn import_db_image(bundle: &str) -> Result<String, JsValue> {
     console_error_panic_hook::set_once();
+    let mut file_lines = String::new();
+    let mut epoch_hex = String::new();
+    for line in bundle.lines() {
+        if let Some(h) = line.strip_prefix("#epoch|") {
+            epoch_hex = h.to_string();
+        } else {
+            file_lines.push_str(line);
+            file_lines.push('\n');
+        }
+    }
     let util = vfs::install::<ffi::WasmOsCallback>(&demo_cfg("pk-import", true), true, &DUMMY_DEK)
         .await
         .map_err(|e| JsValue::from_str(&format!("install: {e:?}")))?;
-    util.import_bundle(bundle)
+    util.import_bundle(&file_lines)
         .map_err(|e| JsValue::from_str(&format!("import: {e:?}")))?;
     util.pause_vfs().map_err(|e| JsValue::from_str(&format!("pause: {e:?}")))?;
-    Ok(())
+    Ok(epoch_hex)
 }

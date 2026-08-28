@@ -60,6 +60,9 @@ const HEADER_CORPUS_SIZE: usize = HEADER_MAX_FILENAME_SIZE + HEADER_FLAGS_SIZE;
 const HEADER_OFFSET_FLAGS: usize = HEADER_MAX_FILENAME_SIZE;
 const HEADER_OFFSET_DATA: usize = SECTOR_SIZE;
 
+// ENC (sync-epoch): AAD binding the epoch token to its purpose (sync-epoch-design §4).
+const EPOCH_AAD: &[u8] = b"enc-sahpool-epoch";
+
 const PERSISTENT_FILE_TYPES: i32 =
     SQLITE_OPEN_MAIN_DB | SQLITE_OPEN_MAIN_JOURNAL | SQLITE_OPEN_SUPER_JOURNAL | SQLITE_OPEN_WAL;
 
@@ -424,6 +427,9 @@ struct OpfsSAHPool {
     dbs: RefCell<HashMap<String, Rc<DbState>>>,
     // ENC (M3): §14.8 fault-injection gate (dev harness; pass-through when disarmed).
     fault: Rc<FaultState>,
+    // ENC (sync-epoch): random per-install device id, stamped into exported epoch tokens (tiebreak
+    // / provenance only — not security-load-bearing; the token's authenticity comes from K_epoch).
+    device_id: [u8; 16],
 }
 
 impl OpfsSAHPool {
@@ -499,6 +505,7 @@ impl OpfsSAHPool {
             anchor_handle: RefCell::new(None),             // ENC (M2)
             dbs: RefCell::new(HashMap::new()),             // ENC (M2)
             fault: Rc::new(FaultState::new()),             // ENC (M3)
+            device_id: crypto::random_uuid().unwrap_or([0u8; 16]), // ENC (sync-epoch)
         };
 
         pool.acquire_access_handles(clear_files).await?;
@@ -1364,6 +1371,49 @@ impl OpfsSAHPool {
         (seq % 2) as usize
     }
 
+    // ============ ENC (sync-epoch): peer-attested freshness (sync-epoch-design §4/§5) =============
+    // Mint an epoch token for `db_name`: seal {db_uuid, generation, device_id} under K_epoch. Any of
+    // the user's devices (sharing the DEK) can verify it; nobody without the DEK can forge it. The
+    // generation is the manifest's current db_generation (the freshest state this device has).
+    fn export_epoch(&self, db_name: &str) -> Result<Vec<u8>> {
+        let mname = manifest_name(db_name);
+        let (uuid, _kdb, payload) = {
+            let files = self.map_filename_to_file.borrow();
+            let mfile = files
+                .get(&mname)
+                .ok_or_else(|| OpfsSAHError::Generic("no manifest — nothing to attest".into()))?;
+            self.read_manifest(mfile, &mname)?
+        };
+        let mut plain = Vec::with_capacity(16 + 8 + 16);
+        plain.extend_from_slice(&uuid);
+        plain.extend_from_slice(&payload.db_generation.to_le_bytes());
+        plain.extend_from_slice(&self.device_id);
+        Crypto::epoch_key(&self.dek)
+            .seal_bytes(EPOCH_AAD, &plain)
+            .map_err(|e| OpfsSAHError::Generic(format!("epoch seal: {e:?}")))
+    }
+
+    // Apply a peer's epoch token: verify under K_epoch, then RAISE this device's local anchor
+    // high-water mark (`committed`) for that db_uuid — max only, never lower. The existing open-path
+    // rollback check (`manifest_gen + 1 < committed`) then refuses any local state older than what a
+    // peer has witnessed. Returns the attested generation. A stale token (gen ≤ our committed) is a
+    // harmless no-op; a forged/tampered token fails authentication.
+    fn apply_epoch(&self, token: &[u8]) -> Result<u64> {
+        let plain = Crypto::epoch_key(&self.dek)
+            .open_bytes(EPOCH_AAD, token)
+            .map_err(|_| {
+                OpfsSAHError::Generic("epoch token failed authentication (wrong DEK or tampered)".into())
+            })?;
+        if plain.len() < 24 {
+            return Err(OpfsSAHError::Generic("epoch token truncated".into()));
+        }
+        let mut uuid = [0u8; 16];
+        uuid.copy_from_slice(&plain[..16]);
+        let gen = u64::from_le_bytes(plain[16..24].try_into().unwrap());
+        self.anchor_record(&uuid, Some(gen), Some(gen))?;
+        Ok(gen)
+    }
+
     // ENC (M3 cross-device): serialize a DB's on-disk CIPHERTEXT (main + manifest) as a text bundle
     // `name|hex` per line. The bytes are opaque ciphertext — the DEK is NOT in the bundle, so this is
     // a server-blind sync primitive: carry it anywhere; only the passkey/recovery code opens it.
@@ -1927,6 +1977,18 @@ impl OpfsSAHPoolUtil {
     /// device. Writes ciphertext files; opening them still requires the DEK (passkey/recovery).
     pub fn import_bundle(&self, text: &str) -> Result<()> {
         self.pool.import_bundle(text)
+    }
+
+    /// ENC (sync-epoch): mint this device's epoch token for `db_name` (DEK-authenticated freshness
+    /// attestation to hand to a peer). Requires the pool installed with the REAL DEK.
+    pub fn export_epoch(&self, db_name: &str) -> Result<Vec<u8>> {
+        self.pool.export_epoch(db_name)
+    }
+
+    /// ENC (sync-epoch): apply a peer's epoch token — verify + raise the local freshness high-water
+    /// mark so a subsequent rollback below it is refused at open. Requires the REAL DEK.
+    pub fn apply_epoch(&self, token: &[u8]) -> Result<u64> {
+        self.pool.apply_epoch(token)
     }
 
     pub fn delete_db(&self, filename: &str) -> Result<bool> {

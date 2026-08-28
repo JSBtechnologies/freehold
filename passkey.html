@@ -74,6 +74,7 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
 
     const LS_CRED = 'pk-demo-cred-id';
     const LS_BLOB = 'pk-demo-envelope';
+    const LS_EPOCH = 'pk-demo-epoch'; // sync-epoch token from the last imported bundle (freshness)
     const PRF_SALT = new TextEncoder().encode('enc-sahpool/passkey-prf/v1');
     const RP = { name: 'enc-sahpool demo' };
 
@@ -149,8 +150,10 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
 
     $('exportBundle').onclick = async () => {
       try {
-        log('Bundling the envelope + credential id + encrypted DB image…');
-        const { bundle: db } = await call({ type: 'export_db' });
+        log('Approve your passkey to authorize the export (also mints a freshness epoch)…');
+        const { prf } = await getPrf(currentCredId());
+        log('Bundling the envelope + credential id + encrypted DB image + freshness epoch…');
+        const { bundle: db } = await call({ type: 'export_db', prf: buf(prf), blob: localStorage.getItem(LS_BLOB) }, []);
         const pkg = JSON.stringify({
           v: 1, envelope: localStorage.getItem(LS_BLOB), credId: localStorage.getItem(LS_CRED), db,
         });
@@ -168,11 +171,13 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
         const pkg = JSON.parse(await file.text());
         if (!pkg.envelope || !pkg.db) throw new Error('not an enc-sahpool bundle');
         log('Importing the encrypted DB image into this device’s OPFS…');
-        await call({ type: 'import_db_image', bundle: pkg.db });
+        const { epochHex } = await call({ type: 'import_db_image', bundle: pkg.db });
         localStorage.setItem(LS_BLOB, pkg.envelope);
         if (pkg.credId) localStorage.setItem(LS_CRED, pkg.credId);
+        if (epochHex) localStorage.setItem(LS_EPOCH, epochHex); else localStorage.removeItem(LS_EPOCH);
         syncButtons(); await refreshMethods();
-        log('Imported. Now Unlock with the synced passkey (tests PRF across devices) or the recovery code.', 'ok');
+        log('Imported (with freshness epoch). Unlock with the synced passkey or the recovery code. ' +
+            'Re-importing an OLDER bundle now will be refused as a rollback.', 'ok');
       } catch (e) { log('Import failed: ' + (e.message || e), 'err'); }
       finally { ev.target.value = ''; }
     };
@@ -226,7 +231,7 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
       try {
         log('Asserting your passkey to re-derive the PRF…');
         const { prf } = await getPrf(currentCredId());
-        const r = await call({ type: 'unlock', prf: buf(prf), blob: localStorage.getItem(LS_BLOB) }, []);
+        const r = await call({ type: 'unlock', prf: buf(prf), blob: localStorage.getItem(LS_BLOB), epoch: localStorage.getItem(LS_EPOCH) || '' }, []);
         log('UNLOCKED (passkey). Decrypted row:\n\n    ' + r.secret +
             '\n\nThe DEK was never stored — reconstructed from your passkey.', 'ok');
       } catch (e) { log('Unlock failed: ' + (e.message || e), 'err'); }
@@ -237,14 +242,14 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
         const code = $('recoveryInput').value.trim();
         if (!code) throw new Error('paste a recovery code first');
         log('Deriving the recovery KEK (Argon2id) and opening the DB…');
-        const r = await call({ type: 'unlock_recovery', code, blob: localStorage.getItem(LS_BLOB) });
+        const r = await call({ type: 'unlock_recovery', code, blob: localStorage.getItem(LS_BLOB), epoch: localStorage.getItem(LS_EPOCH) || '' });
         log('UNLOCKED (recovery code). Decrypted row:\n\n    ' + r.secret +
             '\n\nSame DEK, opened by the recovery method — no passkey needed.', 'ok');
       } catch (e) { log('Recovery unlock failed: ' + (e.message || e), 'err'); }
     };
 
     $('reset').onclick = async () => {
-      localStorage.removeItem(LS_CRED); localStorage.removeItem(LS_BLOB);
+      localStorage.removeItem(LS_CRED); localStorage.removeItem(LS_BLOB); localStorage.removeItem(LS_EPOCH);
       syncButtons(); await refreshMethods();
       log('Forgot the stored envelope. (Passkeys still live in your authenticator.)', 'muted');
     };

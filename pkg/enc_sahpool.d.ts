@@ -18,9 +18,10 @@ export function add_recovery(existing_prf: Uint8Array, code: string, blob_hex: s
 export function enroll(prf: Uint8Array): Promise<string>;
 
 /**
- * Export the demo DB's encrypted image as a `name|hex` bundle (DEK-free; safe to carry anywhere).
+ * Export the demo DB's encrypted image PLUS a sync-epoch token (`#epoch|<hex>` line). The image is
+ * DEK-free; the epoch token is DEK-authenticated freshness. Needs the passkey PRF to mint the epoch.
  */
-export function export_db(): Promise<string>;
+export function export_db(prf: Uint8Array, blob_hex: string): Promise<string>;
 
 /**
  * Generate a fresh recovery code for the user to write down.
@@ -28,9 +29,11 @@ export function export_db(): Promise<string>;
 export function gen_recovery(): string;
 
 /**
- * Import an encrypted DB image (from `export_db` on another device) into this device's OPFS.
+ * Import an encrypted DB image (from `export_db`). Writes the ciphertext files and RETURNS the
+ * peer's epoch token (hex) — the caller stores it and passes it to `unlock`, which applies it
+ * (a stale image below that epoch is then refused at open). Empty string if the bundle had no epoch.
  */
-export function import_db_image(bundle: string): Promise<void>;
+export function import_db_image(bundle: string): Promise<string>;
 
 /**
  * List the envelope's unlock methods as `kek_id:kind` pairs, comma-separated (kind: passkey|recovery).
@@ -45,15 +48,16 @@ export function remove_method(kek_id: number, blob_hex: string): string;
 export function run_tests(): Promise<string>;
 
 /**
- * Unlock: unwrap the DEK from `blob_hex` using the PRF output, open the DB, return the secret row.
+ * Unlock: apply any peer `epoch_hex` (freshness), unwrap the DEK via the PRF, open the DB, return
+ * the secret row. Pass "" for epoch_hex when there's no peer epoch to apply.
  */
-export function unlock(prf: Uint8Array, blob_hex: string): Promise<string>;
+export function unlock(prf: Uint8Array, blob_hex: string, epoch_hex: string): Promise<string>;
 
 /**
  * Unlock with the recovery code instead of a passkey: derive the Argon2id KEK, unwrap the DEK,
  * open the DB, return the secret row.
  */
-export function unlock_recovery(code: string, blob_hex: string): Promise<string>;
+export function unlock_recovery(code: string, blob_hex: string, epoch_hex: string): Promise<string>;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
@@ -62,14 +66,14 @@ export interface InitOutput {
     readonly add_passkey: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly add_recovery: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly enroll: (a: number, b: number) => any;
-    readonly export_db: () => any;
+    readonly export_db: (a: number, b: number, c: number, d: number) => any;
     readonly gen_recovery: () => [number, number, number, number];
     readonly import_db_image: (a: number, b: number) => any;
     readonly list_methods: (a: number, b: number) => [number, number, number, number];
     readonly remove_method: (a: number, b: number, c: number) => [number, number, number, number];
     readonly run_tests: () => any;
-    readonly unlock: (a: number, b: number, c: number, d: number) => any;
-    readonly unlock_recovery: (a: number, b: number, c: number, d: number) => any;
+    readonly unlock: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
+    readonly unlock_recovery: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
     readonly rust_sqlite_wasm_abort: () => void;
     readonly rust_sqlite_wasm_assert_fail: (a: number, b: number, c: number, d: number) => void;
     readonly rust_sqlite_wasm_calloc: (a: number, b: number) => number;

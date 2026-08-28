@@ -107,6 +107,47 @@ impl Crypto {
         Self::from_info(dek, b"enc-sahpool-anchor-v1")
     }
 
+    /// Subkey authenticating cross-device **sync-epoch tokens** (sync-epoch-design §4). Any of a
+    /// user's devices (all sharing the DEK) can mint/verify an epoch; an attacker without the DEK
+    /// cannot forge one.
+    pub fn epoch_key(dek: &[u8; 32]) -> Self {
+        Self::from_info(dek, b"enc-sahpool-epoch-v1")
+    }
+
+    /// General small-payload AEAD seal for variable-length authenticated blobs (epoch tokens, etc.).
+    /// Output = `nonce(24) || ciphertext || tag(16)`. Fresh random nonce, fail-closed (§17.F).
+    pub fn seal_bytes(&self, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let mut nonce = [0u8; NONCE_LEN];
+        getrandom::getrandom(&mut nonce).map_err(|_| CryptoError::Rng)?;
+        if nonce.iter().all(|&b| b == 0) {
+            return Err(CryptoError::Rng);
+        }
+        let mut buf = plaintext.to_vec();
+        let tag = self
+            .cipher
+            .encrypt_in_place_detached(XNonce::from_slice(&nonce), aad, &mut buf)
+            .map_err(|_| CryptoError::Seal)?;
+        let mut out = Vec::with_capacity(NONCE_LEN + buf.len() + TAG_LEN);
+        out.extend_from_slice(&nonce);
+        out.extend_from_slice(&buf);
+        out.extend_from_slice(&tag);
+        Ok(out)
+    }
+
+    /// Inverse of [`Crypto::seal_bytes`]. Authentication failure → `CryptoError::Open`.
+    pub fn open_bytes(&self, aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        if sealed.len() < NONCE_LEN + TAG_LEN {
+            return Err(CryptoError::Open);
+        }
+        let (nonce, rest) = sealed.split_at(NONCE_LEN);
+        let (ct, tag) = rest.split_at(rest.len() - TAG_LEN);
+        let mut buf = ct.to_vec();
+        self.cipher
+            .decrypt_in_place_detached(XNonce::from_slice(nonce), aad, &mut buf, Tag::from_slice(tag))
+            .map_err(|_| CryptoError::Open)?;
+        Ok(buf)
+    }
+
     /// Seal one `B`-byte plaintext block into `out` (`P` bytes: ciphertext‖nonce‖tag), in place.
     ///
     /// A fresh CSPRNG nonce is drawn per call (§8). Fails closed on any RNG problem (§17.F).

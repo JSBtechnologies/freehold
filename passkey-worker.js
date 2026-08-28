@@ -18,15 +18,15 @@ self.onmessage = async (e) => {
     let result;
     switch (m.type) {
       case 'enroll':          result = { blobHex: await enroll(prf) }; break;
-      case 'unlock':          result = { secret: await unlock(prf, m.blob) }; break;
+      case 'unlock':          result = { secret: await unlock(prf, m.blob, m.epoch || '') }; break;
       case 'gen_recovery':    result = { code: gen_recovery() }; break;
       case 'add_recovery':    result = { blobHex: add_recovery(prf, m.code, m.blob) }; break;
       case 'add_passkey':     result = { blobHex: add_passkey(prf, prf2, m.blob) }; break;
       case 'remove_method':   result = { blobHex: remove_method(m.kekId, m.blob) }; break;
       case 'list_methods':    result = { methods: list_methods(m.blob) }; break;
-      case 'unlock_recovery': result = { secret: await unlock_recovery(m.code, m.blob) }; break;
-      case 'export_db':       result = { bundle: await export_db() }; break;
-      case 'import_db_image':  await import_db_image(m.bundle); result = {}; break;
+      case 'unlock_recovery': result = { secret: await unlock_recovery(m.code, m.blob, m.epoch || '') }; break;
+      case 'export_db':       result = { bundle: await export_db(prf, m.blob) }; break;
+      case 'import_db_image':  result = { epochHex: await import_db_image(m.bundle) }; break;
       default: throw new Error('unknown message type: ' + m.type);
     }
     self.postMessage({ id: m.id, ok: true, ...result });

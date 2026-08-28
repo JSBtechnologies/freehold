@@ -78,11 +78,18 @@ export function enroll(prf) {
 }
 
 /**
- * Export the demo DB's encrypted image as a `name|hex` bundle (DEK-free; safe to carry anywhere).
+ * Export the demo DB's encrypted image PLUS a sync-epoch token (`#epoch|<hex>` line). The image is
+ * DEK-free; the epoch token is DEK-authenticated freshness. Needs the passkey PRF to mint the epoch.
+ * @param {Uint8Array} prf
+ * @param {string} blob_hex
  * @returns {Promise<string>}
  */
-export function export_db() {
-    const ret = wasm.export_db();
+export function export_db(prf, blob_hex) {
+    const ptr0 = passArray8ToWasm0(prf, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(blob_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.export_db(ptr0, len0, ptr1, len1);
     return ret;
 }
 
@@ -110,9 +117,11 @@ export function gen_recovery() {
 }
 
 /**
- * Import an encrypted DB image (from `export_db` on another device) into this device's OPFS.
+ * Import an encrypted DB image (from `export_db`). Writes the ciphertext files and RETURNS the
+ * peer's epoch token (hex) — the caller stores it and passes it to `unlock`, which applies it
+ * (a stale image below that epoch is then refused at open). Empty string if the bundle had no epoch.
  * @param {string} bundle
- * @returns {Promise<void>}
+ * @returns {Promise<string>}
  */
 export function import_db_image(bundle) {
     const ptr0 = passStringToWasm0(bundle, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -183,17 +192,21 @@ export function run_tests() {
 }
 
 /**
- * Unlock: unwrap the DEK from `blob_hex` using the PRF output, open the DB, return the secret row.
+ * Unlock: apply any peer `epoch_hex` (freshness), unwrap the DEK via the PRF, open the DB, return
+ * the secret row. Pass "" for epoch_hex when there's no peer epoch to apply.
  * @param {Uint8Array} prf
  * @param {string} blob_hex
+ * @param {string} epoch_hex
  * @returns {Promise<string>}
  */
-export function unlock(prf, blob_hex) {
+export function unlock(prf, blob_hex, epoch_hex) {
     const ptr0 = passArray8ToWasm0(prf, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passStringToWasm0(blob_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len1 = WASM_VECTOR_LEN;
-    const ret = wasm.unlock(ptr0, len0, ptr1, len1);
+    const ptr2 = passStringToWasm0(epoch_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.unlock(ptr0, len0, ptr1, len1, ptr2, len2);
     return ret;
 }
 
@@ -202,14 +215,17 @@ export function unlock(prf, blob_hex) {
  * open the DB, return the secret row.
  * @param {string} code
  * @param {string} blob_hex
+ * @param {string} epoch_hex
  * @returns {Promise<string>}
  */
-export function unlock_recovery(code, blob_hex) {
+export function unlock_recovery(code, blob_hex, epoch_hex) {
     const ptr0 = passStringToWasm0(code, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passStringToWasm0(blob_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len1 = WASM_VECTOR_LEN;
-    const ret = wasm.unlock_recovery(ptr0, len0, ptr1, len1);
+    const ptr2 = passStringToWasm0(epoch_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.unlock_recovery(ptr0, len0, ptr1, len1, ptr2, len2);
     return ret;
 }
 function __wbg_get_imports() {
