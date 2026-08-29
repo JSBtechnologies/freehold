@@ -223,7 +223,10 @@ export class FreeholdVault {
     this.#touch();
   }
 
-  /** Open a session with a written recovery code instead of a passkey. */
+  /** Open a session with a written recovery code instead of a passkey.
+   *  Note: `code` is a JS string, so (unlike the PRF path's transferable buffer) it cannot be
+   *  zeroized and lingers in the main-thread heap until GC. It's a user-facing "write it down"
+   *  secret, so this is a known LOW residual; hardening would take it as a transferable Uint8Array. */
   async unlockWithRecovery(code) {
     await this.#call('session_open_recovery', [code, await this.#envelope(), await this.#epoch()]);
     this.#touch();

@@ -233,7 +233,12 @@ async fn sync_epoch_test() -> std::result::Result<String, String> {
         exec(db, "CREATE TABLE t(v TEXT)")?;
         exec(db, "INSERT INTO t(v) VALUES ('one')")?;
         ffi::sqlite3_close(db);
-        let early = a.export_bundle(SDB).map_err(|e| format!("export early: {e:?}"))?; // low gen
+        let early_text = a.export_bundle(SDB).map_err(|e| format!("export early: {e:?}"))?; // low gen
+        let early: Vec<(String, Vec<u8>)> = early_text
+            .lines()
+            .filter_map(|l| l.split_once('|'))
+            .map(|(n, h)| Ok::<_, String>((n.to_string(), hex_to_bytes(h)?)))
+            .collect::<std::result::Result<_, _>>()?;
         let db = open_default(SDB)?;
         exec(db, "INSERT INTO t(v) VALUES ('two'),('three')")?; // advance the generation
         ffi::sqlite3_close(db);
@@ -247,7 +252,7 @@ async fn sync_epoch_test() -> std::result::Result<String, String> {
     // state — the peer epoch is the ONLY reason it knows the import is a rollback. Must be REJECTED. --
     let b = install_dir("se-b", "epoch-b", true, &DEK_OK).await?;
     let seen = b.apply_epoch(&epoch_late).map_err(|e| format!("B apply epoch: {e:?}"))?;
-    b.import_bundle(&img_early).map_err(|e| format!("B import early: {e:?}"))?;
+    b.import_files(&img_early).map_err(|e| format!("B import early: {e:?}"))?;
     let rolled_back_rejected = unsafe {
         match open_default(SDB) {
             Err(_) => true,
@@ -262,7 +267,7 @@ async fn sync_epoch_test() -> std::result::Result<String, String> {
 
     // ---- Device C (contrast): SAME stale image, but NO epoch applied → opens (rollback NOT caught) --
     let c = install_dir("se-c", "epoch-c", true, &DEK_OK).await?;
-    c.import_bundle(&img_early).map_err(|e| format!("C import early: {e:?}"))?;
+    c.import_files(&img_early).map_err(|e| format!("C import early: {e:?}"))?;
     let contrast_opens = unsafe {
         match open_default(SDB) {
             Ok(db) => {
@@ -456,6 +461,44 @@ async fn run() -> std::result::Result<String, String> {
             "B.  TLV bundle: {}-byte container (envelope+cred_id+2 files+epoch) round-trips | truncated + bad-magic rejected\n",
             enc.len()
         ));
+    }
+
+    // ---- B2. import name validation (security-review I-1/I-2): a hostile .freehold carries
+    // attacker-controlled file names straight into pool writes. `import_files` must accept only the
+    // export grammar (`<db>.db`, `<db>.db#manifest`) and reject path-ish / delimiter-laced names.
+    {
+        let util = install_dir("import-guard", "enc-import-guard", true, &DUMMY_DEK)
+            .await
+            .map_err(|e| format!("B2. install: {e}"))?;
+        // Legal names import fine.
+        util.import_files(&[
+            ("app.db".to_string(), vec![0u8; 16]),
+            ("app.db#manifest".to_string(), vec![0u8; 16]),
+            ("my_notes-2.db".to_string(), vec![0u8; 16]),
+        ])
+        .map_err(|e| format!("B2. legal names rejected: {e:?}"))?;
+        // Each hostile name must be refused.
+        let hostile = [
+            "../../etc/passwd",
+            "app.db|deadbeef",
+            "app.db\nempty.db",
+            "app.db#manifest#manifest",
+            "APP.db",
+            "app.txt",
+            "app.db-journal",
+            "",
+            "#manifest",
+        ];
+        for name in hostile {
+            if util
+                .import_files(&[(name.to_string(), vec![0u8; 16])])
+                .is_ok()
+            {
+                return Err(format!("B2. hostile bundle name {name:?} was ACCEPTED on import!"));
+            }
+        }
+        util.pause_vfs().map_err(|e| format!("B2. pause: {e:?}"))?;
+        r.push_str("B2. import guard: legal db/manifest names accepted | 9 hostile names (path, |, newline, case, journal, empty) rejected\n");
     }
 
     r.push_str("cipher: XChaCha20-Poly1305 | P=4136 | journal=DELETE | manifest: 2-slot ping-pong\n\n");
@@ -895,9 +938,6 @@ fn hex_to_bytes(s: &str) -> std::result::Result<Vec<u8>, String> {
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| "bad blob hex".to_string()))
         .collect()
 }
-fn bytes_to_hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
 
 /// Generate a fresh recovery code for the user to write down.
 #[wasm_bindgen]
@@ -963,18 +1003,12 @@ const DUMMY_DEK: [u8; 32] = [0u8; 32];
 pub async fn import_bundle(bytes: &[u8]) -> Result<JsValue, JsValue> {
     console_error_panic_hook::set_once();
     let b = bundle::decode(bytes).map_err(|e| JsValue::from_str(&e))?;
-    // Re-encode the file sections as the `name|hex` interchange the vfs import surface expects.
-    let mut file_lines = String::new();
-    for (name, data) in &b.files {
-        file_lines.push_str(name);
-        file_lines.push('|');
-        file_lines.push_str(&bytes_to_hex(data));
-        file_lines.push('\n');
-    }
     let util = vfs::install::<ffi::WasmOsCallback>(&demo_cfg("pk-import", true), true, &DUMMY_DEK)
         .await
         .map_err(|e| JsValue::from_str(&format!("install: {e:?}")))?;
-    util.import_bundle(&file_lines)
+    // Bundle file names are attacker-controlled; `import_files` validates each against the export
+    // grammar and writes bytes directly — no `name|hex` text round-trip (security-review I-1/I-2).
+    util.import_files(&b.files)
         .map_err(|e| JsValue::from_str(&format!("import: {e:?}")))?;
     util.pause_vfs().map_err(|e| JsValue::from_str(&format!("pause: {e:?}")))?;
     let out = js_sys::Object::new();

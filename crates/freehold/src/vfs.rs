@@ -1434,17 +1434,19 @@ impl OpfsSAHPool {
         Ok(out)
     }
 
-    fn import_bundle(&self, text: &str) -> Result<()> {
-        for line in text.lines() {
-            let Some((name, hex)) = line.split_once('|') else { continue };
-            if hex.len() % 2 != 0 {
-                return Err(OpfsSAHError::Generic("bundle: odd hex length".into()));
+    // Byte-level import of a decoded bundle's files. Names come from an attacker-controlled
+    // `.freehold`, so every name is validated against the export grammar (`valid_pool_filename`)
+    // BEFORE any write — a single illegal name aborts the whole import, and there is no `name|hex`
+    // text round-trip to confuse (security-review I-1/I-2). Ciphertext is written as-is; it only
+    // decrypts later under the real DEK, so a forged image fails closed at open, never bricks.
+    fn import_files(&self, files: &[(String, Vec<u8>)]) -> Result<()> {
+        for (name, _) in files {
+            if !valid_pool_filename(name) {
+                return Err(OpfsSAHError::Generic(format!("bundle: illegal file name {name:?}")));
             }
-            let bytes: Vec<u8> = (0..hex.len())
-                .step_by(2)
-                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap_or(0))
-                .collect();
-            self.import_ciphertext_file(name, &bytes)?;
+        }
+        for (name, bytes) in files {
+            self.import_ciphertext_file(name, bytes)?;
         }
         Ok(())
     }
@@ -1562,6 +1564,18 @@ impl OpfsSAHPool {
 // name SQLite constructs, so it can never collide with a real database/journal path.
 fn manifest_name(db: &str) -> String {
     format!("{db}#manifest")
+}
+
+// The only pool file names a legitimate export can produce: `<base>.db` or `<base>.db#manifest`,
+// where `<base>` is the `[a-z0-9_-]{1,32}` db-name grammar the session layer enforces. Applied to
+// attacker-supplied bundle names on import — forbids path-ish names, the `|`/newline that would
+// confuse any text interchange, and manifest/journal shadowing of out-of-grammar names.
+fn valid_pool_filename(name: &str) -> bool {
+    let core = name.strip_suffix("#manifest").unwrap_or(name);
+    let Some(base) = core.strip_suffix(".db") else { return false };
+    !base.is_empty()
+        && base.len() <= 32
+        && base.bytes().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'))
 }
 
 // ENC (M2): map a satellite file back to its owning main DB (§17.H — super-journal deferred).
@@ -1975,8 +1989,8 @@ impl OpfsSAHPoolUtil {
 
     /// ENC (M3 cross-device): import an encrypted DB image produced by `export_bundle` on another
     /// device. Writes ciphertext files; opening them still requires the DEK (passkey/recovery).
-    pub fn import_bundle(&self, text: &str) -> Result<()> {
-        self.pool.import_bundle(text)
+    pub fn import_files(&self, files: &[(String, Vec<u8>)]) -> Result<()> {
+        self.pool.import_files(files)
     }
 
     /// ENC (sync-epoch): mint this device's epoch token for `db_name` (DEK-authenticated freshness
