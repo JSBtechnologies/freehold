@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>enc-sahpool — passkey-PRF unlock, N-KEK envelope (build-spec M2/M3)</title>
+  <title>epochdb — passkey-PRF unlock, N-KEK envelope (build-spec M2/M3)</title>
   <style>
     body { margin: 0; font: 14px/1.6 ui-monospace, monospace; background: #0b1020; color: #e6e9f2; }
     main { max-width: 780px; margin: 0 auto; padding: 28px 20px; }
@@ -76,8 +76,8 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
     const LS_CRED = 'pk-demo-cred-id';
     const LS_BLOB = 'pk-demo-envelope';
     const LS_EPOCH = 'pk-demo-epoch'; // sync-epoch token from the last imported bundle (freshness)
-    const PRF_SALT = new TextEncoder().encode('enc-sahpool/passkey-prf/v1');
-    const RP = { name: 'enc-sahpool demo' };
+    const PRF_SALT = new TextEncoder().encode('epochdb/passkey-prf/v1');
+    const RP = { name: 'epochdb demo' };
 
     const rand = (n) => crypto.getRandomValues(new Uint8Array(n));
     const b64uEnc = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)))
@@ -169,9 +169,9 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
         });
         const url = URL.createObjectURL(new Blob([pkg], { type: 'application/json' }));
         const a = document.createElement('a');
-        a.href = url; a.download = 'enc-sahpool-bundle.json'; a.click();
+        a.href = url; a.download = 'epochdb-bundle.json'; a.click();
         URL.revokeObjectURL(url);
-        log('Exported enc-sahpool-bundle.json — no key inside. Copy it to device B and Import there.', 'ok');
+        log('Exported epochdb-bundle.json — no key inside. Copy it to device B and Import there.', 'ok');
       } catch (e) { log('Export failed: ' + (e.message || e), 'err'); }
     };
 
@@ -179,7 +179,7 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
       try {
         const file = ev.target.files[0]; if (!file) return;
         const pkg = JSON.parse(await file.text());
-        if (!pkg.envelope || !pkg.db) throw new Error('not an enc-sahpool bundle');
+        if (!pkg.envelope || !pkg.db) throw new Error('not an epochdb bundle');
         log('Importing the encrypted DB image into this device’s OPFS…');
         const { epochHex } = await call({ type: 'import_db_image', bundle: pkg.db });
         localStorage.setItem(LS_BLOB, pkg.envelope);

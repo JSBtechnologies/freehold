@@ -1,0 +1,65 @@
+[package]
+name = "epochdb"
+version = "0.1.0"
+edition = "2021"
+description = "Passkey-unlocked, header-free encrypted SQLite for the browser: XChaCha20-Poly1305 encrypting OPFS VFS, WebAuthn-PRF N-KEK envelope, anti-rollback sync-epoch anchor."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/JSBtechnologies/epochdb"
+keywords = ["sqlite", "wasm", "encryption", "webauthn", "local-first"]
+categories = ["cryptography", "database", "wasm"]
+# A header-free, whole-file-encrypted SQLite storage layer. Forks sqlite-wasm-vfs's `sahpool` VFS
+# and splices an XChaCha20-Poly1305 encrypted block device in at the VfsFile (xRead/xWrite)
+# boundary. See docs/BUILD-NOTES.md for the design-spec §17 guarantee ledger.
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# `testing-api` exposes the attacker-simulation / fault-injection / raw-export methods on
+# OpfsSAHPoolUtil used by the in-browser test harness (run_tests). It is ON by default because
+# THIS crate *is* the harness. A production consumer that vendors the `vfs` module builds with
+# `default-features = false`, and the raw/fault surface (which can bypass AEAD) disappears at
+# compile time (security-review 1.2/1.1).
+default = ["testing-api"]
+testing-api = []
+
+# wasm-opt (binaryen) crashes on this module on Windows (0xc0000409); rustc -O is what matters
+# for cipher throughput, so skip the post-pass.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[dependencies]
+# SQLite compiled to wasm32. sqlite3mc feature not needed (we do NOT use its codec) but the default
+# build is fine; we only need the core SQLite + WasmOsCallback.
+sqlite-wasm-rs = { version = "0.5" }
+# Trait/ffi plumbing for custom VFS (SQLiteVfs / SQLiteIoMethods / VfsFile / VfsStore). Unmodified.
+rsqlite-vfs = "0.1"
+
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+tokio = { version = "1", features = ["sync"] }
+thiserror = "2"
+
+# --- The trusted crypto core (all audited RustCrypto; no invented crypto, used as-is) ---
+chacha20poly1305 = "0.10"   # XChaCha20-Poly1305 AEAD (24-byte nonce) — design-spec §5
+hkdf = "0.12"               # HKDF-SHA256 subkey derivation — §17.E (single-domain in M1)
+sha2 = "0.10"               # SHA-256 for HKDF + file_id
+zeroize = "1"               # Zeroizing scratch buffers / DEK — §17.M
+getrandom = { version = "0.2", features = ["js"] }  # CSPRNG (crypto.getRandomValues) — §8/§17.F
+argon2 = "0.5"              # Argon2id KDF for the recovery-code KEK (M3 envelope) — RustCrypto
+console_error_panic_hook = "0.1"  # dev harness only: surface panic messages in the worker console
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+    "StorageManager",
+    "FileSystemSyncAccessHandle",
+    "FileSystemDirectoryHandle",
+    "FileSystemGetDirectoryOptions",
+    "FileSystemReadWriteOptions",
+    "WorkerGlobalScope",
+    "WorkerNavigator",
+    "FileSystemGetFileOptions",
+    "FileSystemFileHandle",
+]

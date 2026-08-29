@@ -67,11 +67,11 @@ pub enum CryptoError {
 /// Holds one HKDF-derived block subkey. The DEK itself is never stored here.
 ///
 /// Three derivation domains (§17.E):
-///   * [`Crypto::db_key`]     — `HKDF(DEK, "enc-sahpool/vfs-db-v1" ‖ db_uuid)`: all blocks of a main
+///   * [`Crypto::db_key`]     — `HKDF(DEK, "epochdb/vfs-db-v1" ‖ db_uuid)`: all blocks of a main
 ///     DB and its satellite files (journal/wal). Salted by the DB's random `db_uuid`, so a manifest
 ///     moved to another DB (or opened with another DEK) fails to decrypt outright.
-///   * [`Crypto::pool_key`]   — `HKDF(DEK, "enc-sahpool-v1")`: files not attributable to a DB (temp).
-///   * [`Crypto::anchor_key`] — `HKDF(DEK, "enc-sahpool-anchor-v1")`: the TrustedGeneration anchor.
+///   * [`Crypto::pool_key`]   — `HKDF(DEK, "epochdb-v1")`: files not attributable to a DB (temp).
+///   * [`Crypto::anchor_key`] — `HKDF(DEK, "epochdb-anchor-v1")`: the TrustedGeneration anchor.
 pub struct Crypto {
     cipher: XChaCha20Poly1305,
 }
@@ -91,27 +91,27 @@ impl Crypto {
 
     /// Pool-domain subkey (files with no owning DB, e.g. temp files that reach the VFS).
     pub fn pool_key(dek: &[u8; 32]) -> Self {
-        Self::from_info(dek, b"enc-sahpool-v1")
+        Self::from_info(dek, b"epochdb-v1")
     }
 
     /// Per-DB subkey `K_db` (§17.E), salted by the DB's random 128-bit `db_uuid`.
     pub fn db_key(dek: &[u8; 32], db_uuid: &[u8; 16]) -> Self {
-        let mut info = [0u8; 22 + 16];
-        info[..22].copy_from_slice(b"enc-sahpool/vfs-db-v1\0");
-        info[22..].copy_from_slice(db_uuid);
+        let mut info = [0u8; 18 + 16];
+        info[..18].copy_from_slice(b"epochdb/vfs-db-v1\0");
+        info[18..].copy_from_slice(db_uuid);
         Self::from_info(dek, &info)
     }
 
     /// Subkey sealing the local `TrustedGeneration` anchor file (§10.4/§17.D).
     pub fn anchor_key(dek: &[u8; 32]) -> Self {
-        Self::from_info(dek, b"enc-sahpool-anchor-v1")
+        Self::from_info(dek, b"epochdb-anchor-v1")
     }
 
     /// Subkey authenticating cross-device **sync-epoch tokens** (sync-epoch-design §4). Any of a
     /// user's devices (all sharing the DEK) can mint/verify an epoch; an attacker without the DEK
     /// cannot forge one.
     pub fn epoch_key(dek: &[u8; 32]) -> Self {
-        Self::from_info(dek, b"enc-sahpool-epoch-v1")
+        Self::from_info(dek, b"epochdb-epoch-v1")
     }
 
     /// General small-payload AEAD seal for variable-length authenticated blobs (epoch tokens, etc.).

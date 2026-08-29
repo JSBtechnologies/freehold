@@ -1,0 +1,12 @@
+{
+  "name": "epochdb-demo",
+  "private": true,
+  "type": "module",
+  "description": "EpochDB demo: VFS self-test harness (/) and passkey-PRF unlock demo (/passkey.html), served over the prebuilt wasm in ./pkg.",
+  "scripts": {
+    "dev": "vite"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "name": "epochdb",
+  "type": "module",
+  "description": "Passkey-unlocked, header-free encrypted SQLite for the browser: XChaCha20-Poly1305 encrypting OPFS VFS, WebAuthn-PRF N-KEK envelope, anti-rollback sync-epoch anchor.",
+  "version": "0.1.0",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JSBtechnologies/epochdb"
+  },
+  "files": [
+    "epochdb_bg.wasm",
+    "epochdb.js",
+    "epochdb.d.ts"
+  ],
+  "main": "epochdb.js",
+  "types": "epochdb.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ],
+  "keywords": [
+    "sqlite",
+    "wasm",
+    "encryption",
+    "webauthn",
+    "local-first"
+  ]
+}

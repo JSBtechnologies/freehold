@@ -1,4 +1,4 @@
-/* @ts-self-types="./enc_sahpool.d.ts" */
+/* @ts-self-types="./epochdb.d.ts" */
 
 /**
  * Add a row to the demo DB (advances db_generation) so you can create a v1/v2 pair for the live
@@ -654,7 +654,7 @@ function __wbg_get_imports() {
     };
     return {
         __proto__: null,
-        "./enc_sahpool_bg.js": import0,
+        "./epochdb_bg.js": import0,
     };
 }
 
@@ -972,7 +972,7 @@ async function __wbg_init(module_or_path) {
     }
 
     if (module_or_path === undefined) {
-        module_or_path = new URL('enc_sahpool_bg.wasm', import.meta.url);
+        module_or_path = new URL('epochdb_bg.wasm', import.meta.url);
     }
     const imports = __wbg_get_imports();
 

@@ -4,7 +4,7 @@
 import init, {
   enroll, unlock, gen_recovery, add_recovery, add_passkey, remove_method, list_methods, unlock_recovery,
   export_db, import_db_image, add_note,
-} from './pkg/enc_sahpool.js';
+} from './pkg/epochdb.js';
 
 let ready = false;
 async function ensure() { if (!ready) { await init(); ready = true; } }

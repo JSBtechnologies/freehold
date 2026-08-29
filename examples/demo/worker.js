@@ -1,6 +1,6 @@
-// Runs the enc-sahpool Milestone-1 wasm in a DEDICATED worker (SAHPool requires a Worker + secure
+// Runs the epochdb Milestone-1 wasm in a DEDICATED worker (SAHPool requires a Worker + secure
 // context; header-free means NO COOP/COEP headers are needed to load this).
-import init, { run_tests } from './pkg/enc_sahpool.js';
+import init, { run_tests } from './pkg/epochdb.js';
 
 self.onmessage = async () => {
   try {

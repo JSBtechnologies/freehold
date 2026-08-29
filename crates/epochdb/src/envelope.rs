@@ -7,11 +7,11 @@
 //!
 //! ```text
 //!  blob   = header(28) | slot[0..slot_count]
-//!  header = magic "ENCENV2\0"(8) | version(1)=2 | slot_count(1) | reserved(2) | env_salt(16)
+//!  header = magic "EPDBENV2"(8) | version(1)=2 | slot_count(1) | reserved(2) | env_salt(16)
 //!  slot   = kek_id(1) | kind(1) | nonce(24) | wrapped_dek_ct(32) | tag(16)          (74 bytes)
-//!  aad    = "enc-sahpool-envelope-v2" | kek_id | kind
+//!  aad    = "epochdb-envelope-v2" | kek_id | kind
 //!
-//!  kind 0 (passkey):  KEK = HKDF-SHA256(prf_output, info="enc-sahpool-kek-v1")
+//!  kind 0 (passkey):  KEK = HKDF-SHA256(prf_output, info="epochdb-kek-v1")
 //!  kind 1 (recovery): KEK = Argon2id(normalized_recovery_code, salt = env_salt)
 //! ```
 //!
@@ -31,15 +31,17 @@ use zeroize::Zeroizing;
 pub const DEK_LEN: usize = 32;
 const NONCE_LEN: usize = 24;
 const TAG_LEN: usize = 16;
-const MAGIC: &[u8; 8] = b"ENCENV2\0";
+// EpochDB rebrand of the prototype's "ENCENV2\0" magic — same layout, new identity. Envelopes
+// created by the enc-sahpool prototype do NOT open here (intended pre-release break; re-enroll).
+const MAGIC: &[u8; 8] = b"EPDBENV2";
 const VERSION: u8 = 2;
 const SALT_LEN: usize = 16;
 const HEADER_LEN: usize = 8 + 1 + 1 + 2 + SALT_LEN; // 28
 const SALT_OFF: usize = 12;
 const SLOT_LEN: usize = 1 + 1 + NONCE_LEN + DEK_LEN + TAG_LEN; // 74
 
-const KEK_INFO: &[u8] = b"enc-sahpool-kek-v1";
-const WRAP_AAD_PREFIX: &[u8] = b"enc-sahpool-envelope-v2";
+const KEK_INFO: &[u8] = b"epochdb-kek-v1";
+const WRAP_AAD_PREFIX: &[u8] = b"epochdb-envelope-v2";
 
 pub const KIND_PASSKEY: u8 = 0;
 pub const KIND_RECOVERY: u8 = 1;
