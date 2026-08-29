@@ -1,0 +1,28 @@
+{
+  "name": "@freehold/db",
+  "version": "0.1.0",
+  "description": "Passkey-unlocked, end-to-end-encrypted SQLite for the browser — typed ESM SDK over the freehold wasm core (WebAuthn-PRF ceremony + worker plumbing wrapped).",
+  "type": "module",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "vault-worker.js",
+    "README.md"
+  ],
+  "keywords": [
+    "sqlite",
+    "wasm",
+    "encryption",
+    "webauthn",
+    "passkey",
+    "opfs",
+    "local-first"
+  ],
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JSBtechnologies/freehold"
+  }
+}

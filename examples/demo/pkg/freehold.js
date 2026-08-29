@@ -4,16 +4,16 @@
  * Add a row to the demo DB (advances db_generation) so you can create a v1/v2 pair for the live
  * two-device rollback test. Applies any peer epoch first, then commits a new note.
  * @param {Uint8Array} prf
- * @param {string} blob_hex
- * @param {string} epoch_hex
+ * @param {Uint8Array} blob
+ * @param {Uint8Array} epoch
  * @returns {Promise<string>}
  */
-export function add_note(prf, blob_hex, epoch_hex) {
+export function add_note(prf, blob, epoch) {
     const ptr0 = passArray8ToWasm0(prf, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passStringToWasm0(blob_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr1 = passArray8ToWasm0(blob, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
-    const ptr2 = passStringToWasm0(epoch_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr2 = passArray8ToWasm0(epoch, wasm.__wbindgen_malloc);
     const len2 = WASM_VECTOR_LEN;
     const ret = wasm.add_note(ptr0, len0, ptr1, len1, ptr2, len2);
     return ret;
@@ -23,71 +23,53 @@ export function add_note(prf, blob_hex, epoch_hex) {
  * Add a second passkey method: unlock with the existing PRF, wrap the DEK under the new PRF.
  * @param {Uint8Array} existing_prf
  * @param {Uint8Array} new_prf
- * @param {string} blob_hex
- * @returns {string}
+ * @param {Uint8Array} blob
+ * @returns {Uint8Array}
  */
-export function add_passkey(existing_prf, new_prf, blob_hex) {
-    let deferred5_0;
-    let deferred5_1;
-    try {
-        const ptr0 = passArray8ToWasm0(existing_prf, wasm.__wbindgen_malloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passArray8ToWasm0(new_prf, wasm.__wbindgen_malloc);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(blob_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len2 = WASM_VECTOR_LEN;
-        const ret = wasm.add_passkey(ptr0, len0, ptr1, len1, ptr2, len2);
-        var ptr4 = ret[0];
-        var len4 = ret[1];
-        if (ret[3]) {
-            ptr4 = 0; len4 = 0;
-            throw takeFromExternrefTable0(ret[2]);
-        }
-        deferred5_0 = ptr4;
-        deferred5_1 = len4;
-        return getStringFromWasm0(ptr4, len4);
-    } finally {
-        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+export function add_passkey(existing_prf, new_prf, blob) {
+    const ptr0 = passArray8ToWasm0(existing_prf, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(new_prf, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passArray8ToWasm0(blob, wasm.__wbindgen_malloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.add_passkey(ptr0, len0, ptr1, len1, ptr2, len2);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
     }
+    var v4 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v4;
 }
 
 /**
  * Add a recovery-code method: unlock the DEK with the current passkey's PRF, then wrap it under the
- * recovery code's Argon2id KEK. Returns the new envelope blob (hex). The DEK is unchanged.
+ * recovery code's Argon2id KEK. Returns the new envelope blob. The DEK is unchanged.
  * @param {Uint8Array} existing_prf
  * @param {string} code
- * @param {string} blob_hex
- * @returns {string}
+ * @param {Uint8Array} blob
+ * @returns {Uint8Array}
  */
-export function add_recovery(existing_prf, code, blob_hex) {
-    let deferred5_0;
-    let deferred5_1;
-    try {
-        const ptr0 = passArray8ToWasm0(existing_prf, wasm.__wbindgen_malloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(code, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(blob_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len2 = WASM_VECTOR_LEN;
-        const ret = wasm.add_recovery(ptr0, len0, ptr1, len1, ptr2, len2);
-        var ptr4 = ret[0];
-        var len4 = ret[1];
-        if (ret[3]) {
-            ptr4 = 0; len4 = 0;
-            throw takeFromExternrefTable0(ret[2]);
-        }
-        deferred5_0 = ptr4;
-        deferred5_1 = len4;
-        return getStringFromWasm0(ptr4, len4);
-    } finally {
-        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+export function add_recovery(existing_prf, code, blob) {
+    const ptr0 = passArray8ToWasm0(existing_prf, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(code, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passArray8ToWasm0(blob, wasm.__wbindgen_malloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.add_recovery(ptr0, len0, ptr1, len1, ptr2, len2);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
     }
+    var v4 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v4;
 }
 
 /**
- * Enroll: wrap a fresh DEK under the PRF-KEK, create the demo DB, return the envelope blob (hex).
+ * Enroll: wrap a fresh DEK under the PRF-KEK, create the demo DB, return the envelope blob.
  * @param {Uint8Array} prf
- * @returns {Promise<string>}
+ * @returns {Promise<Uint8Array>}
  */
 export function enroll(prf) {
     const ptr0 = passArray8ToWasm0(prf, wasm.__wbindgen_malloc);
@@ -97,18 +79,23 @@ export function enroll(prf) {
 }
 
 /**
- * Export the demo DB's encrypted image PLUS a sync-epoch token (`#epoch|<hex>` line). The image is
- * DEK-free; the epoch token is DEK-authenticated freshness. Needs the passkey PRF to mint the epoch.
+ * Export a self-contained binary `.freehold` bundle: envelope + credential id + the encrypted DB
+ * image + a freshly minted sync-epoch token (bundle.rs TLV). The image is DEK-free; the epoch
+ * token is DEK-authenticated freshness. Needs the passkey PRF to mint the epoch. Pass an empty
+ * `cred_id` slice if there is none to embed (e.g. recovery-only flows).
  * @param {Uint8Array} prf
- * @param {string} blob_hex
- * @returns {Promise<string>}
+ * @param {Uint8Array} blob
+ * @param {Uint8Array} cred_id
+ * @returns {Promise<Uint8Array>}
  */
-export function export_db(prf, blob_hex) {
+export function export_db(prf, blob, cred_id) {
     const ptr0 = passArray8ToWasm0(prf, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passStringToWasm0(blob_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr1 = passArray8ToWasm0(blob, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
-    const ret = wasm.export_db(ptr0, len0, ptr1, len1);
+    const ptr2 = passArray8ToWasm0(cred_id, wasm.__wbindgen_malloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.export_db(ptr0, len0, ptr1, len1, ptr2, len2);
     return ret;
 }
 
@@ -136,29 +123,30 @@ export function gen_recovery() {
 }
 
 /**
- * Import an encrypted DB image (from `export_db`). Writes the ciphertext files and RETURNS the
- * peer's epoch token (hex) — the caller stores it and passes it to `unlock`, which applies it
- * (a stale image below that epoch is then refused at open). Empty string if the bundle had no epoch.
- * @param {string} bundle
- * @returns {Promise<string>}
+ * Import a binary bundle (from `export_db`). Writes the ciphertext files into a fresh pool and
+ * returns `{ envelope, credId, epoch }` (Uint8Array fields; credId/epoch empty if absent) — the
+ * caller persists them and passes the epoch to `unlock`, which applies it (a stale image below
+ * that epoch is then refused at open).
+ * @param {Uint8Array} bytes
+ * @returns {Promise<any>}
  */
-export function import_db_image(bundle) {
-    const ptr0 = passStringToWasm0(bundle, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+export function import_bundle(bytes) {
+    const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.import_db_image(ptr0, len0);
+    const ret = wasm.import_bundle(ptr0, len0);
     return ret;
 }
 
 /**
  * List the envelope's unlock methods as `kek_id:kind` pairs, comma-separated (kind: passkey|recovery).
- * @param {string} blob_hex
+ * @param {Uint8Array} blob
  * @returns {string}
  */
-export function list_methods(blob_hex) {
+export function list_methods(blob) {
     let deferred3_0;
     let deferred3_1;
     try {
-        const ptr0 = passStringToWasm0(blob_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const ptr0 = passArray8ToWasm0(blob, wasm.__wbindgen_malloc);
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.list_methods(ptr0, len0);
         var ptr2 = ret[0];
@@ -176,30 +164,64 @@ export function list_methods(blob_hex) {
 }
 
 /**
- * Revoke a method by its kek_id. Returns the new blob (hex). Refuses to remove the last slot.
+ * Revoke a method by its kek_id. Returns the new blob. Refuses to remove the last slot.
  * @param {number} kek_id
- * @param {string} blob_hex
- * @returns {string}
+ * @param {Uint8Array} blob
+ * @returns {Uint8Array}
  */
-export function remove_method(kek_id, blob_hex) {
-    let deferred3_0;
-    let deferred3_1;
-    try {
-        const ptr0 = passStringToWasm0(blob_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.remove_method(kek_id, ptr0, len0);
-        var ptr2 = ret[0];
-        var len2 = ret[1];
-        if (ret[3]) {
-            ptr2 = 0; len2 = 0;
-            throw takeFromExternrefTable0(ret[2]);
-        }
-        deferred3_0 = ptr2;
-        deferred3_1 = len2;
-        return getStringFromWasm0(ptr2, len2);
-    } finally {
-        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+export function remove_method(kek_id, blob) {
+    const ptr0 = passArray8ToWasm0(blob, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.remove_method(kek_id, ptr0, len0);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
     }
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
+ * Run arbitrary SQL after a passkey-PRF unlock. Returns a JSON array of row arrays (stringified
+ * values, NULL → null); statements that return no rows yield "[]".
+ * @param {Uint8Array} prf
+ * @param {Uint8Array} blob
+ * @param {Uint8Array} epoch
+ * @param {string} sql
+ * @returns {Promise<string>}
+ */
+export function run_sql(prf, blob, epoch, sql) {
+    const ptr0 = passArray8ToWasm0(prf, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(blob, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passArray8ToWasm0(epoch, wasm.__wbindgen_malloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ptr3 = passStringToWasm0(sql, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len3 = WASM_VECTOR_LEN;
+    const ret = wasm.run_sql(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+    return ret;
+}
+
+/**
+ * Run arbitrary SQL after a recovery-code unlock (same semantics as `run_sql`).
+ * @param {string} code
+ * @param {Uint8Array} blob
+ * @param {Uint8Array} epoch
+ * @param {string} sql
+ * @returns {Promise<string>}
+ */
+export function run_sql_recovery(code, blob, epoch, sql) {
+    const ptr0 = passStringToWasm0(code, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(blob, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passArray8ToWasm0(epoch, wasm.__wbindgen_malloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ptr3 = passStringToWasm0(sql, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len3 = WASM_VECTOR_LEN;
+    const ret = wasm.run_sql_recovery(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+    return ret;
 }
 
 /**
@@ -211,19 +233,19 @@ export function run_tests() {
 }
 
 /**
- * Unlock: apply any peer `epoch_hex` (freshness), unwrap the DEK via the PRF, open the DB, return
- * the secret row. Pass "" for epoch_hex when there's no peer epoch to apply.
+ * Unlock: apply any peer `epoch` token (freshness), unwrap the DEK via the PRF, open the DB,
+ * return the secret row. Pass an empty slice for `epoch` when there's no peer epoch to apply.
  * @param {Uint8Array} prf
- * @param {string} blob_hex
- * @param {string} epoch_hex
+ * @param {Uint8Array} blob
+ * @param {Uint8Array} epoch
  * @returns {Promise<string>}
  */
-export function unlock(prf, blob_hex, epoch_hex) {
+export function unlock(prf, blob, epoch) {
     const ptr0 = passArray8ToWasm0(prf, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passStringToWasm0(blob_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr1 = passArray8ToWasm0(blob, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
-    const ptr2 = passStringToWasm0(epoch_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr2 = passArray8ToWasm0(epoch, wasm.__wbindgen_malloc);
     const len2 = WASM_VECTOR_LEN;
     const ret = wasm.unlock(ptr0, len0, ptr1, len1, ptr2, len2);
     return ret;
@@ -233,16 +255,16 @@ export function unlock(prf, blob_hex, epoch_hex) {
  * Unlock with the recovery code instead of a passkey: derive the Argon2id KEK, unwrap the DEK,
  * open the DB, return the secret row.
  * @param {string} code
- * @param {string} blob_hex
- * @param {string} epoch_hex
+ * @param {Uint8Array} blob
+ * @param {Uint8Array} epoch
  * @returns {Promise<string>}
  */
-export function unlock_recovery(code, blob_hex, epoch_hex) {
+export function unlock_recovery(code, blob, epoch) {
     const ptr0 = passStringToWasm0(code, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passStringToWasm0(blob_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr1 = passArray8ToWasm0(blob, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
-    const ptr2 = passStringToWasm0(epoch_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr2 = passArray8ToWasm0(epoch, wasm.__wbindgen_malloc);
     const len2 = WASM_VECTOR_LEN;
     const ret = wasm.unlock_recovery(ptr0, len0, ptr1, len1, ptr2, len2);
     return ret;
@@ -471,6 +493,10 @@ function __wbg_get_imports() {
             const ret = new Date(arg0);
             return ret;
         },
+        __wbg_new_from_slice_3eea173078478cfe: function(arg0, arg1) {
+            const ret = new Uint8Array(getArrayU8FromWasm0(arg0, arg1));
+            return ret;
+        },
         __wbg_new_typed_cceaf62d8d95e9f2: function(arg0, arg1) {
             try {
                 var state0 = {a: arg0, b: arg1};
@@ -549,6 +575,10 @@ function __wbg_get_imports() {
         __wbg_setUint32_6e4c7e967587027b: function(arg0, arg1, arg2) {
             arg0.setUint32(arg1 >>> 0, arg2 >>> 0);
         },
+        __wbg_set_8155bb79a948541b: function() { return handleError(function (arg0, arg1, arg2) {
+            const ret = Reflect.set(arg0, arg1, arg2);
+            return ret;
+        }, arguments); },
         __wbg_set_at_6f40905f0edc79cf: function(arg0, arg1) {
             arg0.at = arg1;
         },
@@ -623,7 +653,7 @@ function __wbg_get_imports() {
             return ret;
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 681, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 690, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__ha22148a4a7c1d5ff);
             return ret;
         },
@@ -640,6 +670,13 @@ function __wbg_get_imports() {
         __wbindgen_cast_0000000000000004: function(arg0, arg1) {
             // Cast intrinsic for `Ref(String) -> Externref`.
             const ret = getStringFromWasm0(arg0, arg1);
+            return ret;
+        },
+        __wbindgen_cast_0000000000000005: function(arg0, arg1) {
+            var v0 = getArrayU8FromWasm0(arg0, arg1).slice();
+            wasm.__wbindgen_free(arg0, arg1 * 1, 1);
+            // Cast intrinsic for `Vector(U8) -> Externref`.
+            const ret = v0;
             return ret;
         },
         __wbindgen_init_externref_table: function() {

@@ -7,7 +7,7 @@
 //!
 //! ```text
 //!  blob   = header(28) | slot[0..slot_count]
-//!  header = magic "FREEHOLD"(8) | version(1)=2 | slot_count(1) | reserved(2) | env_salt(16)
+//!  header = magic "FREEHENV"(8) | version(1)=2 | slot_count(1) | reserved(2) | env_salt(16)
 //!  slot   = kek_id(1) | kind(1) | nonce(24) | wrapped_dek_ct(32) | tag(16)          (74 bytes)
 //!  aad    = "freehold-envelope-v2" | kek_id | kind
 //!
@@ -31,9 +31,10 @@ use zeroize::Zeroizing;
 pub const DEK_LEN: usize = 32;
 const NONCE_LEN: usize = 24;
 const TAG_LEN: usize = 16;
-// The magic is the product name — exactly 8 bytes. Same header layout as the prototype lineage
-// ("ENCENV2\0"); envelopes from earlier identities do NOT open here (pre-release break; re-enroll).
-const MAGIC: &[u8; 8] = b"FREEHOLD";
+// "FREEH(old)ENV(elope)" — the bare product name b"FREEHOLD" is the .freehold bundle's magic
+// (bundle.rs), and the two formats' version namespaces must stay independent, so the envelope
+// gets its own. Envelopes from earlier identities do NOT open here (pre-release break; re-enroll).
+const MAGIC: &[u8; 8] = b"FREEHENV";
 const VERSION: u8 = 2;
 const SALT_LEN: usize = 16;
 const HEADER_LEN: usize = 8 + 1 + 1 + 2 + SALT_LEN; // 28

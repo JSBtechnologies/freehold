@@ -18,6 +18,7 @@
 //!       plaintext baseline by design — §17.G)
 //! See BUILD-NOTES for the honest IN/DEFERRED ledger.
 
+mod bundle;
 mod crypto;
 mod envelope;
 mod manifest;
@@ -341,6 +342,36 @@ async fn run() -> std::result::Result<String, String> {
         envelope::open_with_recovery(&env, &code).map_err(|_| "M3 envelope: recovery broke after removing A".to_string())?;
         r.push_str(&format!(
             "M3. N-KEK envelope: 2 passkeys + recovery all recover 1 DEK | wrong code rejected | revoke A ({n_before}→{n_after} slots) leaves B+recovery working\n"
+        ));
+    }
+
+    // ---- B. binary TLV bundle (bundle.rs — export/import container, future Sync wire format) --
+    // Round-trip: envelope + cred_id + 2 files + epoch encode → decode byte-identical. Malformed
+    // input (truncated mid-section, wrong magic) must Err cleanly — never panic, never mis-parse.
+    {
+        let env_b = vec![0xa5u8; 102];
+        let cred = vec![0x42u8; 16];
+        let files = vec![
+            ("app.db".to_string(), vec![0xeeu8; 300]),
+            ("app.db#manifest".to_string(), vec![0x11u8; 64]),
+        ];
+        let epoch = vec![0x77u8; 40];
+        let enc = bundle::encode(&env_b, &cred, &files, &epoch);
+        let dec = bundle::decode(&enc).map_err(|e| format!("B. bundle decode: {e}"))?;
+        if dec.envelope != env_b || dec.cred_id != cred || dec.files != files || dec.epoch != epoch {
+            return Err("B. bundle round-trip: decoded fields != originals".into());
+        }
+        if bundle::decode(&enc[..enc.len() - 7]).is_ok() {
+            return Err("B. bundle: TRUNCATED input decoded without error!".into());
+        }
+        let mut bad = enc.clone();
+        bad[0] ^= 0xff;
+        if bundle::decode(&bad).is_ok() {
+            return Err("B. bundle: BAD MAGIC decoded without error!".into());
+        }
+        r.push_str(&format!(
+            "B.  TLV bundle: {}-byte container (envelope+cred_id+2 files+epoch) round-trips | truncated + bad-magic rejected\n",
+            enc.len()
         ));
     }
 
@@ -742,7 +773,7 @@ fn demo_cfg(name: &str, clear: bool) -> vfs::OpfsSAHPoolCfg {
         .build()
 }
 
-async fn enroll_inner(prf: &[u8]) -> std::result::Result<String, String> {
+async fn enroll_inner(prf: &[u8]) -> std::result::Result<Vec<u8>, String> {
     if prf.len() < 16 {
         return Err("PRF output too short — is the `prf` extension actually supported here?".into());
     }
@@ -761,22 +792,20 @@ async fn enroll_inner(prf: &[u8]) -> std::result::Result<String, String> {
         ffi::sqlite3_close(db);
     }
     util.pause_vfs().map_err(|e| format!("pause: {e:?}"))?;
-    // Return the envelope blob (hex) for the page to persist; the DEK never leaves wasm memory.
-    Ok(blob.iter().map(|b| format!("{b:02x}")).collect())
+    // Return the envelope blob for the caller to persist; the DEK never leaves wasm memory.
+    Ok(blob)
 }
 
-async fn unlock_inner(prf: &[u8], blob_hex: &str, epoch_hex: &str) -> std::result::Result<String, String> {
-    let blob = hex_to_bytes(blob_hex)?;
-    let dek = envelope::open_with_prf(&blob, prf)
+async fn unlock_inner(prf: &[u8], blob: &[u8], epoch: &[u8]) -> std::result::Result<String, String> {
+    let dek = envelope::open_with_prf(blob, prf)
         .map_err(|_| "unlock failed — wrong passkey, wrong PRF/UV state, or tampered envelope".to_string())?;
 
     let util = vfs::install::<ffi::WasmOsCallback>(&demo_cfg("pk-unlock", false), true, &dek)
         .await
         .map_err(|e| format!("install: {e:?}"))?;
     // sync-epoch: apply any peer epoch BEFORE opening so a rollback below it is refused at open.
-    if !epoch_hex.is_empty() {
-        let token = hex_to_bytes(epoch_hex)?;
-        util.apply_epoch(&token).map_err(|e| format!("apply_epoch: {e:?}"))?;
+    if !epoch.is_empty() {
+        util.apply_epoch(epoch).map_err(|e| format!("apply_epoch: {e:?}"))?;
     }
     let row = unsafe {
         let db = open_default(DEMO_DB)
@@ -790,23 +819,25 @@ async fn unlock_inner(prf: &[u8], blob_hex: &str, epoch_hex: &str) -> std::resul
     Ok(row)
 }
 
-/// Enroll: wrap a fresh DEK under the PRF-KEK, create the demo DB, return the envelope blob (hex).
+/// Enroll: wrap a fresh DEK under the PRF-KEK, create the demo DB, return the envelope blob.
 #[wasm_bindgen]
-pub async fn enroll(prf: &[u8]) -> Result<String, JsValue> {
+pub async fn enroll(prf: &[u8]) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
     enroll_inner(prf).await.map_err(|e| JsValue::from_str(&e))
 }
 
-/// Unlock: apply any peer `epoch_hex` (freshness), unwrap the DEK via the PRF, open the DB, return
-/// the secret row. Pass "" for epoch_hex when there's no peer epoch to apply.
+/// Unlock: apply any peer `epoch` token (freshness), unwrap the DEK via the PRF, open the DB,
+/// return the secret row. Pass an empty slice for `epoch` when there's no peer epoch to apply.
 #[wasm_bindgen]
-pub async fn unlock(prf: &[u8], blob_hex: &str, epoch_hex: &str) -> Result<String, JsValue> {
+pub async fn unlock(prf: &[u8], blob: &[u8], epoch: &[u8]) -> Result<String, JsValue> {
     console_error_panic_hook::set_once();
-    unlock_inner(prf, blob_hex, epoch_hex).await.map_err(|e| JsValue::from_str(&e))
+    unlock_inner(prf, blob, epoch).await.map_err(|e| JsValue::from_str(&e))
 }
 
 // ---- M3: N-KEK envelope management (pure re-wrap ops — no DB re-encryption) ----
 
+// Hex helpers survive ONLY for the `name|hex` OPFS interchange that vfs.rs's testing-api bundle
+// surface speaks (export_bundle/import_bundle). The wasm boundary itself is bytes end-to-end.
 fn hex_to_bytes(s: &str) -> std::result::Result<Vec<u8>, String> {
     if s.len() % 2 != 0 {
         return Err("odd-length blob hex".into());
@@ -827,51 +858,39 @@ pub fn gen_recovery() -> Result<String, JsValue> {
 }
 
 /// Add a recovery-code method: unlock the DEK with the current passkey's PRF, then wrap it under the
-/// recovery code's Argon2id KEK. Returns the new envelope blob (hex). The DEK is unchanged.
+/// recovery code's Argon2id KEK. Returns the new envelope blob. The DEK is unchanged.
 #[wasm_bindgen]
-pub fn add_recovery(existing_prf: &[u8], code: &str, blob_hex: &str) -> Result<String, JsValue> {
-    let go = || -> std::result::Result<String, String> {
-        let blob = hex_to_bytes(blob_hex)?;
-        let dek = envelope::open_with_prf(&blob, existing_prf)
+pub fn add_recovery(existing_prf: &[u8], code: &str, blob: &[u8]) -> Result<Vec<u8>, JsValue> {
+    let go = || -> std::result::Result<Vec<u8>, String> {
+        let dek = envelope::open_with_prf(blob, existing_prf)
             .map_err(|_| "current passkey did not unlock — cannot add a method".to_string())?;
-        let out = envelope::add_recovery_slot(&blob, &dek, code)
-            .map_err(|e| format!("add_recovery_slot: {e:?}"))?;
-        Ok(bytes_to_hex(&out))
+        envelope::add_recovery_slot(blob, &dek, code).map_err(|e| format!("add_recovery_slot: {e:?}"))
     };
     go().map_err(|e| JsValue::from_str(&e))
 }
 
 /// Add a second passkey method: unlock with the existing PRF, wrap the DEK under the new PRF.
 #[wasm_bindgen]
-pub fn add_passkey(existing_prf: &[u8], new_prf: &[u8], blob_hex: &str) -> Result<String, JsValue> {
-    let go = || -> std::result::Result<String, String> {
-        let blob = hex_to_bytes(blob_hex)?;
-        let dek = envelope::open_with_prf(&blob, existing_prf)
+pub fn add_passkey(existing_prf: &[u8], new_prf: &[u8], blob: &[u8]) -> Result<Vec<u8>, JsValue> {
+    let go = || -> std::result::Result<Vec<u8>, String> {
+        let dek = envelope::open_with_prf(blob, existing_prf)
             .map_err(|_| "current passkey did not unlock — cannot add a method".to_string())?;
-        let out = envelope::add_passkey_slot(&blob, &dek, new_prf)
-            .map_err(|e| format!("add_passkey_slot: {e:?}"))?;
-        Ok(bytes_to_hex(&out))
+        envelope::add_passkey_slot(blob, &dek, new_prf).map_err(|e| format!("add_passkey_slot: {e:?}"))
     };
     go().map_err(|e| JsValue::from_str(&e))
 }
 
-/// Revoke a method by its kek_id. Returns the new blob (hex). Refuses to remove the last slot.
+/// Revoke a method by its kek_id. Returns the new blob. Refuses to remove the last slot.
 #[wasm_bindgen]
-pub fn remove_method(kek_id: u8, blob_hex: &str) -> Result<String, JsValue> {
-    let go = || -> std::result::Result<String, String> {
-        let blob = hex_to_bytes(blob_hex)?;
-        let out = envelope::remove_slot(&blob, kek_id)
-            .map_err(|e| format!("remove_slot: {e:?} (cannot remove the last method)"))?;
-        Ok(bytes_to_hex(&out))
-    };
-    go().map_err(|e| JsValue::from_str(&e))
+pub fn remove_method(kek_id: u8, blob: &[u8]) -> Result<Vec<u8>, JsValue> {
+    envelope::remove_slot(blob, kek_id)
+        .map_err(|e| JsValue::from_str(&format!("remove_slot: {e:?} (cannot remove the last method)")))
 }
 
 /// List the envelope's unlock methods as `kek_id:kind` pairs, comma-separated (kind: passkey|recovery).
 #[wasm_bindgen]
-pub fn list_methods(blob_hex: &str) -> Result<String, JsValue> {
-    let blob = hex_to_bytes(blob_hex).map_err(|e| JsValue::from_str(&e))?;
-    let s = envelope::slot_infos(&blob)
+pub fn list_methods(blob: &[u8]) -> Result<String, JsValue> {
+    let s = envelope::slot_infos(blob)
         .iter()
         .map(|i| {
             let kind = if i.kind == envelope::KIND_RECOVERY { "recovery" } else { "passkey" };
@@ -885,17 +904,15 @@ pub fn list_methods(blob_hex: &str) -> Result<String, JsValue> {
 /// Unlock with the recovery code instead of a passkey: derive the Argon2id KEK, unwrap the DEK,
 /// open the DB, return the secret row.
 #[wasm_bindgen]
-pub async fn unlock_recovery(code: &str, blob_hex: &str, epoch_hex: &str) -> Result<String, JsValue> {
+pub async fn unlock_recovery(code: &str, blob: &[u8], epoch: &[u8]) -> Result<String, JsValue> {
     console_error_panic_hook::set_once();
-    let blob = hex_to_bytes(blob_hex).map_err(|e| JsValue::from_str(&e))?;
-    let dek = envelope::open_with_recovery(&blob, code)
+    let dek = envelope::open_with_recovery(blob, code)
         .map_err(|_| JsValue::from_str("recovery code did not unlock — wrong code or tampered envelope"))?;
     let util = vfs::install::<ffi::WasmOsCallback>(&demo_cfg("pk-recover", false), true, &dek)
         .await
         .map_err(|e| JsValue::from_str(&format!("install: {e:?}")))?;
-    if !epoch_hex.is_empty() {
-        let token = hex_to_bytes(epoch_hex).map_err(|e| JsValue::from_str(&e))?;
-        util.apply_epoch(&token).map_err(|e| JsValue::from_str(&format!("apply_epoch: {e:?}")))?;
+    if !epoch.is_empty() {
+        util.apply_epoch(epoch).map_err(|e| JsValue::from_str(&format!("apply_epoch: {e:?}")))?;
     }
     let row = unsafe {
         let db = open_default(DEMO_DB).map_err(|e| JsValue::from_str(&format!("open: {e}")))?;
@@ -917,17 +934,15 @@ const DUMMY_DEK: [u8; 32] = [0u8; 32];
 /// Add a row to the demo DB (advances db_generation) so you can create a v1/v2 pair for the live
 /// two-device rollback test. Applies any peer epoch first, then commits a new note.
 #[wasm_bindgen]
-pub async fn add_note(prf: &[u8], blob_hex: &str, epoch_hex: &str) -> Result<String, JsValue> {
+pub async fn add_note(prf: &[u8], blob: &[u8], epoch: &[u8]) -> Result<String, JsValue> {
     console_error_panic_hook::set_once();
-    let blob = hex_to_bytes(blob_hex).map_err(|e| JsValue::from_str(&e))?;
-    let dek = envelope::open_with_prf(&blob, prf)
+    let dek = envelope::open_with_prf(blob, prf)
         .map_err(|_| JsValue::from_str("unlock failed — cannot add data"))?;
     let util = vfs::install::<ffi::WasmOsCallback>(&demo_cfg("pk-note", false), true, &dek)
         .await
         .map_err(|e| JsValue::from_str(&format!("install: {e:?}")))?;
-    if !epoch_hex.is_empty() {
-        let token = hex_to_bytes(epoch_hex).map_err(|e| JsValue::from_str(&e))?;
-        util.apply_epoch(&token).map_err(|e| JsValue::from_str(&format!("apply_epoch: {e:?}")))?;
+    if !epoch.is_empty() {
+        util.apply_epoch(epoch).map_err(|e| JsValue::from_str(&format!("apply_epoch: {e:?}")))?;
     }
     let n = unsafe {
         let db = open_default(DEMO_DB).map_err(|e| JsValue::from_str(&format!("open: {e}")))?;
@@ -943,54 +958,54 @@ pub async fn add_note(prf: &[u8], blob_hex: &str, epoch_hex: &str) -> Result<Str
     Ok(format!("added a note (DB now has {n} rows — a newer version). Export a fresh bundle."))
 }
 
-/// Export the demo DB's encrypted image PLUS a sync-epoch token (`#epoch|<hex>` line). The image is
-/// DEK-free; the epoch token is DEK-authenticated freshness. Needs the passkey PRF to mint the epoch.
+/// Export a self-contained binary `.freehold` bundle: envelope + credential id + the encrypted DB
+/// image + a freshly minted sync-epoch token (bundle.rs TLV). The image is DEK-free; the epoch
+/// token is DEK-authenticated freshness. Needs the passkey PRF to mint the epoch. Pass an empty
+/// `cred_id` slice if there is none to embed (e.g. recovery-only flows).
 #[wasm_bindgen]
-pub async fn export_db(prf: &[u8], blob_hex: &str) -> Result<String, JsValue> {
+pub async fn export_db(prf: &[u8], blob: &[u8], cred_id: &[u8]) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
-    let go = || -> std::result::Result<Vec<u8>, String> {
-        let blob = hex_to_bytes(blob_hex)?;
-        let dek = envelope::open_with_prf(&blob, prf)
-            .map_err(|_| "unlock failed — cannot mint a freshness epoch for export".to_string())?;
-        Ok(dek.as_slice().to_vec())
-    };
-    let dek_v = go().map_err(|e| JsValue::from_str(&e))?;
-    let mut dek = [0u8; 32];
-    dek.copy_from_slice(&dek_v);
+    let dek = envelope::open_with_prf(blob, prf)
+        .map_err(|_| JsValue::from_str("unlock failed — cannot mint a freshness epoch for export"))?;
     let util = vfs::install::<ffi::WasmOsCallback>(&demo_cfg("pk-export", false), true, &dek)
         .await
         .map_err(|e| JsValue::from_str(&format!("install: {e:?}")))?;
-    let mut bundle = util
+    // The vfs testing-api export surface speaks `name|hex` lines; decode to bytes at this boundary
+    // (vfs.rs deliberately untouched) and pack them as binary file sections.
+    let text = util
         .export_bundle(DEMO_DB)
         .map_err(|e| JsValue::from_str(&format!("export: {e:?}")))?;
     let epoch = util
         .export_epoch(DEMO_DB)
         .map_err(|e| JsValue::from_str(&format!("export_epoch: {e:?}")))?;
     util.pause_vfs().map_err(|e| JsValue::from_str(&format!("pause: {e:?}")))?;
-    if bundle.is_empty() {
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    for line in text.lines() {
+        let Some((name, hex)) = line.split_once('|') else { continue };
+        let data = hex_to_bytes(hex).map_err(|e| JsValue::from_str(&e))?;
+        files.push((name.to_string(), data));
+    }
+    if files.is_empty() {
         return Err(JsValue::from_str("nothing to export — enroll and create the DB first"));
     }
-    bundle.push_str("#epoch|");
-    bundle.push_str(&bytes_to_hex(&epoch));
-    bundle.push('\n');
-    Ok(bundle)
+    Ok(bundle::encode(blob, cred_id, &files, &epoch))
 }
 
-/// Import an encrypted DB image (from `export_db`). Writes the ciphertext files and RETURNS the
-/// peer's epoch token (hex) — the caller stores it and passes it to `unlock`, which applies it
-/// (a stale image below that epoch is then refused at open). Empty string if the bundle had no epoch.
+/// Import a binary bundle (from `export_db`). Writes the ciphertext files into a fresh pool and
+/// returns `{ envelope, credId, epoch }` (Uint8Array fields; credId/epoch empty if absent) — the
+/// caller persists them and passes the epoch to `unlock`, which applies it (a stale image below
+/// that epoch is then refused at open).
 #[wasm_bindgen]
-pub async fn import_db_image(bundle: &str) -> Result<String, JsValue> {
+pub async fn import_bundle(bytes: &[u8]) -> Result<JsValue, JsValue> {
     console_error_panic_hook::set_once();
+    let b = bundle::decode(bytes).map_err(|e| JsValue::from_str(&e))?;
+    // Re-encode the file sections as the `name|hex` interchange the vfs import surface expects.
     let mut file_lines = String::new();
-    let mut epoch_hex = String::new();
-    for line in bundle.lines() {
-        if let Some(h) = line.strip_prefix("#epoch|") {
-            epoch_hex = h.to_string();
-        } else {
-            file_lines.push_str(line);
-            file_lines.push('\n');
-        }
+    for (name, data) in &b.files {
+        file_lines.push_str(name);
+        file_lines.push('|');
+        file_lines.push_str(&bytes_to_hex(data));
+        file_lines.push('\n');
     }
     let util = vfs::install::<ffi::WasmOsCallback>(&demo_cfg("pk-import", true), true, &DUMMY_DEK)
         .await
@@ -998,5 +1013,134 @@ pub async fn import_db_image(bundle: &str) -> Result<String, JsValue> {
     util.import_bundle(&file_lines)
         .map_err(|e| JsValue::from_str(&format!("import: {e:?}")))?;
     util.pause_vfs().map_err(|e| JsValue::from_str(&format!("pause: {e:?}")))?;
-    Ok(epoch_hex)
+    let out = js_sys::Object::new();
+    for (k, v) in [("envelope", &b.envelope), ("credId", &b.cred_id), ("epoch", &b.epoch)] {
+        js_sys::Reflect::set(&out, &JsValue::from_str(k), &js_sys::Uint8Array::from(v.as_slice()))?;
+    }
+    Ok(out.into())
+}
+
+// ============================ generic SQL surface (SDK — schema-agnostic) ============================
+// The @freehold/db SDK must not be bound to the demo schema: run arbitrary SQL against the same
+// demo-path DB (demo_cfg/DEMO_DB) that enroll() creates. Rows come back as a JSON array of row
+// arrays with every value stringified (NULL → null). JSON is built by hand — no serde in this
+// crate by design (keep the dependency surface small and reviewable).
+
+fn json_escape_into(out: &mut String, s: &str) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+/// Prepare/step every statement in `sql` (multi-statement scripts allowed — the prepare tail is
+/// followed like sqlite3_exec does), collecting all returned rows into one JSON array. Scripts
+/// that return no rows produce "[]".
+unsafe fn query_json(db: *mut ffi::sqlite3, sql: &str) -> std::result::Result<String, String> {
+    let csql = CString::new(sql).map_err(|_| "SQL contains a NUL byte".to_string())?;
+    let mut out = String::from("[");
+    let mut first_row = true;
+    let mut p = csql.as_ptr();
+    loop {
+        let mut stmt = ptr::null_mut();
+        let mut tail: *const c_char = ptr::null();
+        let rc = ffi::sqlite3_prepare_v2(db, p, -1, &mut stmt, &mut tail);
+        if rc != ffi::SQLITE_OK {
+            let msg = CStr::from_ptr(ffi::sqlite3_errmsg(db)).to_string_lossy().into_owned();
+            return Err(format!("prepare rc={rc}: {msg}"));
+        }
+        // stmt is null for trailing whitespace/comments — skip to the tail, don't step.
+        if !stmt.is_null() {
+            loop {
+                let step = ffi::sqlite3_step(stmt);
+                if step == ffi::SQLITE_ROW {
+                    if !first_row {
+                        out.push(',');
+                    }
+                    first_row = false;
+                    out.push('[');
+                    let ncol = ffi::sqlite3_column_count(stmt);
+                    for i in 0..ncol {
+                        if i > 0 {
+                            out.push(',');
+                        }
+                        if ffi::sqlite3_column_type(stmt, i) == ffi::SQLITE_NULL {
+                            out.push_str("null");
+                        } else {
+                            let t = ffi::sqlite3_column_text(stmt, i);
+                            let s = if t.is_null() {
+                                String::new()
+                            } else {
+                                CStr::from_ptr(t.cast()).to_string_lossy().into_owned()
+                            };
+                            json_escape_into(&mut out, &s);
+                        }
+                    }
+                    out.push(']');
+                } else if step == ffi::SQLITE_DONE {
+                    break;
+                } else {
+                    let msg = CStr::from_ptr(ffi::sqlite3_errmsg(db)).to_string_lossy().into_owned();
+                    ffi::sqlite3_finalize(stmt);
+                    return Err(format!("step rc={step}: {msg}"));
+                }
+            }
+            ffi::sqlite3_finalize(stmt);
+        }
+        if tail.is_null() || *tail == 0 {
+            break;
+        }
+        p = tail;
+    }
+    out.push(']');
+    Ok(out)
+}
+
+/// Shared body for run_sql/run_sql_recovery once the DEK is unwrapped: install on the demo path,
+/// apply any peer epoch BEFORE opening (mirrors unlock), execute, return the JSON rows.
+async fn sql_inner(dek: &[u8; 32], vfs_name: &str, epoch: &[u8], sql: &str) -> std::result::Result<String, String> {
+    let util = vfs::install::<ffi::WasmOsCallback>(&demo_cfg(vfs_name, false), true, dek)
+        .await
+        .map_err(|e| format!("install: {e:?}"))?;
+    if !epoch.is_empty() {
+        util.apply_epoch(epoch).map_err(|e| format!("apply_epoch: {e:?}"))?;
+    }
+    let rows = unsafe {
+        let db = open_default(DEMO_DB)
+            .map_err(|e| format!("open rejected (rollback below a peer epoch, or wrong key): {e}"))?;
+        set_pragmas(db)?;
+        let res = query_json(db, sql);
+        ffi::sqlite3_close(db);
+        res?
+    };
+    util.pause_vfs().map_err(|e| format!("pause: {e:?}"))?;
+    Ok(rows)
+}
+
+/// Run arbitrary SQL after a passkey-PRF unlock. Returns a JSON array of row arrays (stringified
+/// values, NULL → null); statements that return no rows yield "[]".
+#[wasm_bindgen]
+pub async fn run_sql(prf: &[u8], blob: &[u8], epoch: &[u8], sql: &str) -> Result<String, JsValue> {
+    console_error_panic_hook::set_once();
+    let dek = envelope::open_with_prf(blob, prf)
+        .map_err(|_| JsValue::from_str("unlock failed — wrong passkey, wrong PRF/UV state, or tampered envelope"))?;
+    sql_inner(&dek, "pk-sql", epoch, sql).await.map_err(|e| JsValue::from_str(&e))
+}
+
+/// Run arbitrary SQL after a recovery-code unlock (same semantics as `run_sql`).
+#[wasm_bindgen]
+pub async fn run_sql_recovery(code: &str, blob: &[u8], epoch: &[u8], sql: &str) -> Result<String, JsValue> {
+    console_error_panic_hook::set_once();
+    let dek = envelope::open_with_recovery(blob, code)
+        .map_err(|_| JsValue::from_str("recovery code did not unlock — wrong code or tampered envelope"))?;
+    sql_inner(&dek, "pk-sql-rec", epoch, sql).await.map_err(|e| JsValue::from_str(&e))
 }

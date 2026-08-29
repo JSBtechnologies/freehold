@@ -36,10 +36,8 @@ on its keys and sync-epoch machinery.
 |---|---|---|
 | **Rust crate** (`freehold`) | Vendor the VFS/envelope in your own Rust→Wasm app; build with `default-features = false` to compile out the test/fault-injection surface. | working |
 | **Wasm + JS** | `wasm-pack build crates/freehold --target web` produces an npm-shaped `pkg/`; drive it from a worker like `examples/demo` does. | working (prebuilt copy committed in `examples/demo/pkg`) |
-| **Demo app** | `examples/demo` — self-test harness + full passkey enroll/unlock/export/import UI. | working |
-
-A polished npm package with a high-level JS/TS API (ceremony + worker plumbing wrapped) is the next
-layer — see the roadmap.
+| **JS/TS SDK** (`@freehold/db`) | `packages/db` — typed ESM SDK wrapping the passkey ceremony, vault worker and persistence; point it at a `pkg/` build. No build step. | working |
+| **Demo app** | `examples/demo` — self-test harness + full passkey enroll/unlock/export/import UI, built on the SDK. | working |
 
 ## Run the demo (Node only — no Rust toolchain needed)
 
@@ -65,8 +63,9 @@ WebAuthn needs a secure context — `localhost` qualifies. You need a platform a
 The point of the design: unlock the same DB on another device with no server ever seeing the key.
 
 1. **Device A** (`/passkey.html`): **Enroll** → **Add recovery code** (write it down) → **Export
-   bundle** (downloads `freehold-bundle.json` — envelope + encrypted DB image, **no key inside**).
-2. Copy the JSON to **Device B** and **Import** it there.
+   bundle** (downloads `freehold-bundle.freehold` — a binary TLV bundle of envelope + encrypted DB
+   image, **no key inside**).
+2. Copy the `.freehold` file to **Device B** and **Import** it there.
 3. Unlock on B with the **synced passkey** (provider-dependent — confirmed for Chrome + Google
    Password Manager) or the **recovery code** (device-independent by construction; always works).
 
@@ -102,15 +101,15 @@ cd examples/demo && npm install && npm run dev
 ## Status & lineage
 
 Research-grade, pre-release. Grown from the `enc-sahpool` prototype; all format identity strings
-were rebranded at the fork (`freehold-*-v1`, envelope magic `FREEHOLD`), so **bundles/DBs created by
+were rebranded at the fork (`freehold-*-v1`; magics: bundle `FREEHOLD`, envelope `FREEHENV`), so **bundles/DBs created by
 the old prototype do not open here** — re-enroll. Crypto is audited RustCrypto used as-is; the
 design and its limits are documented honestly in `docs/BUILD-NOTES.md`. Not yet independently
 audited — don't bet lives on it.
 
 ## Roadmap
 
-- High-level npm package (`@freehold/db`): TS API wrapping the worker + passkey ceremony. (The
-  bare `freehold` npm name is squatted by a dead 2022 package; the scope is ours.)
+- Publish `@freehold/db` to npm (the SDK lives in `packages/db`). (The bare `freehold` npm name is
+  squatted by a dead 2022 package; the scope is ours.)
 - BIP39 checksummed recovery phrases (currently Crockford-Base32).
 - Broader PRF-stability matrix: iCloud Keychain, 1Password, mobile, roaming keys.
 - "Adv Mode": chunk sharding of the encrypted DB across your own devices/peers.

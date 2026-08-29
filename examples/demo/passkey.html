@@ -52,14 +52,15 @@
 
     <h2>4 · Move to another device (server-blind)</h2>
     <p class="lead" style="margin:2px 0 8px">
-      Export bundles the <b>envelope + credential id + the encrypted DB image</b> into one file —
-      <b>no key inside</b>. Import it on device B, then unlock there with the same synced passkey
-      (tests PRF stability) or the recovery code (works anywhere by construction).
+      Export bundles the <b>envelope + credential id + the encrypted DB image</b> into one binary
+      <code>.freehold</code> file — <b>no key inside</b>. Import it on device B, then unlock there
+      with the same synced passkey (tests PRF stability) or the recovery code (works anywhere by
+      construction).
     </p>
     <button id="addNote" disabled>Add data (new version)</button>
     <button id="exportBundle" disabled>Export bundle (download)</button>
     <label for="importFile" class="muted" style="cursor:pointer; border:1px solid #33477e; border-radius:8px; padding:8px 13px; display:inline-block;">Import bundle…</label>
-    <input id="importFile" type="file" accept="application/json,.json" style="display:none" />
+    <input id="importFile" type="file" accept=".freehold,application/octet-stream" style="display:none" />
 
     <h2>Methods on this envelope</h2>
     <ul id="methods"><li class="muted">none yet — enroll first</li></ul>
@@ -69,64 +70,26 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
   </main>
 
   <script type="module">
+    // This page is the @freehold/db SDK's proving ground: the ceremony, worker protocol and
+    // persistence that used to live inline here all moved into packages/db. Vite serves the
+    // outside-root import via /@fs (see vite.config.js).
+    import { FreeholdVault } from '../../packages/db/index.js';
+
     const $ = (id) => document.getElementById(id);
     const out = $('out');
     const log = (msg, cls) => { out.className = cls || ''; out.textContent = msg; };
 
-    const LS_CRED = 'pk-demo-cred-id';
-    const LS_BLOB = 'pk-demo-envelope';
-    const LS_EPOCH = 'pk-demo-epoch'; // sync-epoch token from the last imported bundle (freshness)
-    const PRF_SALT = new TextEncoder().encode('freehold/passkey-prf/v1');
-    const RP = { name: 'freehold demo' };
-
-    const rand = (n) => crypto.getRandomValues(new Uint8Array(n));
-    const b64uEnc = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)))
-      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-    const b64uDec = (s) => { s = s.replace(/-/g, '+').replace(/_/g, '/');
-      return Uint8Array.from(atob(s + '==='.slice((s.length + 3) % 4)), c => c.charCodeAt(0)); };
-
-    // ---- worker RPC ----
-    const worker = new Worker(new URL('./passkey-worker.js', import.meta.url), { type: 'module' });
-    const pending = new Map(); let seq = 0;
-    worker.onmessage = (e) => { const p = pending.get(e.data.id); if (p) { pending.delete(e.data.id); p(e.data); } };
-    const rpc = (msg, transfer) => new Promise((res) => { const id = ++seq; pending.set(id, res);
-      worker.postMessage({ id, ...msg }, transfer || []); });
-    const call = async (msg, transfer) => { const r = await rpc(msg, transfer); if (!r.ok) throw new Error(r.error); return r; };
-
-    // ---- WebAuthn PRF ceremony (main thread; needs a user gesture) ----
-    async function registerPasskey() {
-      const cred = await navigator.credentials.create({ publicKey: {
-        rp: RP, user: { id: rand(16), name: 'demo-user', displayName: 'Demo User' },
-        challenge: rand(32),
-        pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
-        authenticatorSelection: { residentKey: 'required', userVerification: 'required' },
-        extensions: { prf: {} },
-      }});
-      const ext = cred.getClientExtensionResults();
-      if (!ext.prf || ext.prf.enabled === false) throw new Error('This authenticator did not enable the PRF extension.');
-      return cred.rawId;
-    }
-    async function getPrf(credId) {
-      const a = await navigator.credentials.get({ publicKey: {
-        challenge: rand(32), userVerification: 'required',
-        allowCredentials: credId ? [{ type: 'public-key', id: credId }] : [],
-        extensions: { prf: { eval: { first: PRF_SALT } } },
-      }});
-      const res = a.getClientExtensionResults();
-      if (!res.prf || !res.prf.results || !res.prf.results.first) throw new Error('No PRF result (authenticator may not support prf on get()).');
-      return { prf: new Uint8Array(res.prf.results.first), credId: a.rawId };
-    }
-    const currentCredId = () => { const s = localStorage.getItem(LS_CRED); return s ? b64uDec(s) : null; };
-    const buf = (u8) => u8.buffer.slice(0);
+    if (!FreeholdVault.isSupported()) log('This browser lacks WebAuthn or OPFS — the demo cannot run.', 'err');
+    const vault = await FreeholdVault.open({
+      wasmUrl: new URL('./pkg/freehold.js', import.meta.url),
+      rpName: 'freehold demo',
+    });
 
     async function refreshMethods() {
-      const blob = localStorage.getItem(LS_BLOB);
       const ul = $('methods');
-      if (!blob) { ul.innerHTML = '<li class="muted">none yet — enroll first</li>'; return; }
-      const { methods } = await call({ type: 'list_methods', blob });
+      if (!(await vault.isEnrolled())) { ul.innerHTML = '<li class="muted">none yet — enroll first</li>'; return; }
       ul.innerHTML = '';
-      for (const m of methods.split(',').filter(Boolean)) {
-        const [kekId, kind] = m.split(':');
+      for (const { kekId, kind } of await vault.listMethods()) {
         const li = document.createElement('li');
         const label = document.createElement('span');
         label.textContent = (kind === 'recovery' ? '🔑 recovery code' : '👆 passkey') + `  ·  slot ${kekId}`;
@@ -134,16 +97,15 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
         del.textContent = 'revoke'; del.className = 'danger';
         del.onclick = async () => {
           try {
-            const r = await call({ type: 'remove_method', kekId: Number(kekId), blob: localStorage.getItem(LS_BLOB) });
-            localStorage.setItem(LS_BLOB, r.blobHex); await refreshMethods();
+            await vault.removeMethod(kekId); await refreshMethods();
             log(`Revoked slot ${kekId}. That method can no longer open the DB; the others still can.`, 'ok');
           } catch (e) { log('Revoke failed: ' + e.message, 'err'); }
         };
         li.append(label, del); ul.append(li);
       }
     }
-    function syncButtons() {
-      const has = !!localStorage.getItem(LS_BLOB);
+    async function syncButtons() {
+      const has = await vault.isEnrolled();
       $('unlock').disabled = !has; $('addRecovery').disabled = !has;
       $('addPasskey').disabled = !has; $('unlockRecovery').disabled = !has;
       $('exportBundle').disabled = !has; $('addNote').disabled = !has;
@@ -152,40 +114,32 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
     $('addNote').onclick = async () => {
       try {
         log('Approve your passkey to add a note (advances the DB version)…');
-        const { prf } = await getPrf(currentCredId());
-        const r = await call({ type: 'add_note', prf: buf(prf), blob: localStorage.getItem(LS_BLOB), epoch: localStorage.getItem(LS_EPOCH) || '' }, []);
-        log(r.msg, 'ok');
+        // Generic SQL through the SDK — the demo schema is just SQL now, not a wasm export.
+        const rows = await vault.sql(
+          "INSERT INTO secret(v) VALUES ('note @ ' || datetime('now')); SELECT count(*) FROM secret");
+        log(`Added a note (DB now has ${rows[0][0]} rows — a newer version). Export a fresh bundle.`, 'ok');
       } catch (e) { log('Add data failed: ' + (e.message || e), 'err'); }
     };
 
     $('exportBundle').onclick = async () => {
       try {
         log('Approve your passkey to authorize the export (also mints a freshness epoch)…');
-        const { prf } = await getPrf(currentCredId());
-        log('Bundling the envelope + credential id + encrypted DB image + freshness epoch…');
-        const { bundle: db } = await call({ type: 'export_db', prf: buf(prf), blob: localStorage.getItem(LS_BLOB) }, []);
-        const pkg = JSON.stringify({
-          v: 1, envelope: localStorage.getItem(LS_BLOB), credId: localStorage.getItem(LS_CRED), db,
-        });
-        const url = URL.createObjectURL(new Blob([pkg], { type: 'application/json' }));
+        const bytes = await vault.exportBundle();
+        const url = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
         const a = document.createElement('a');
-        a.href = url; a.download = 'freehold-bundle.json'; a.click();
+        a.href = url; a.download = 'freehold-bundle.freehold'; a.click();
         URL.revokeObjectURL(url);
-        log('Exported freehold-bundle.json — no key inside. Copy it to device B and Import there.', 'ok');
+        log(`Exported freehold-bundle.freehold (${bytes.length} bytes, binary TLV) — no key inside. ` +
+            'Copy it to device B and Import there.', 'ok');
       } catch (e) { log('Export failed: ' + (e.message || e), 'err'); }
     };
 
     $('importFile').onchange = async (ev) => {
       try {
         const file = ev.target.files[0]; if (!file) return;
-        const pkg = JSON.parse(await file.text());
-        if (!pkg.envelope || !pkg.db) throw new Error('not an freehold bundle');
         log('Importing the encrypted DB image into this device’s OPFS…');
-        const { epochHex } = await call({ type: 'import_db_image', bundle: pkg.db });
-        localStorage.setItem(LS_BLOB, pkg.envelope);
-        if (pkg.credId) localStorage.setItem(LS_CRED, pkg.credId);
-        if (epochHex) localStorage.setItem(LS_EPOCH, epochHex); else localStorage.removeItem(LS_EPOCH);
-        syncButtons(); await refreshMethods();
+        await vault.importBundle(new Uint8Array(await file.arrayBuffer()));
+        await syncButtons(); await refreshMethods();
         log('Imported (with freshness epoch). Unlock with the synced passkey or the recovery code. ' +
             'Re-importing an OLDER bundle now will be refused as a rollback.', 'ok');
       } catch (e) { log('Import failed: ' + (e.message || e), 'err'); }
@@ -194,27 +148,18 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
 
     $('enroll').onclick = async () => {
       try {
-        log('Registering a passkey (approve the prompt)…');
-        const credId = await registerPasskey();
-        log('Deriving PRF (approve again to assert)…');
-        const { prf } = await getPrf(credId);
-        log('Wrapping a fresh DEK under the passkey KEK and creating the DB…');
-        const r = await call({ type: 'enroll', prf: buf(prf) }, []);
-        localStorage.setItem(LS_CRED, b64uEnc(credId));
-        localStorage.setItem(LS_BLOB, r.blobHex);
-        syncButtons(); await refreshMethods();
+        log('Registering a passkey, deriving its PRF, wrapping a fresh DEK, creating the DB…');
+        await vault.enroll();
+        await syncButtons(); await refreshMethods();
         log('Enrolled. Add a recovery code so you can get in even without this device.', 'ok');
       } catch (e) { log('Enroll failed: ' + (e.message || e), 'err'); }
     };
 
     $('addRecovery').onclick = async () => {
       try {
-        const { code } = await call({ type: 'gen_recovery' });
         log('Approve your passkey to authorize adding this recovery method…');
-        const { prf } = await getPrf(currentCredId());
-        const r = await call({ type: 'add_recovery', prf: buf(prf), code, blob: localStorage.getItem(LS_BLOB) }, []);
-        localStorage.setItem(LS_BLOB, r.blobHex);
-        syncButtons(); await refreshMethods();
+        const code = await vault.addRecoveryCode();
+        await syncButtons(); await refreshMethods();
         out.className = 'ok';
         out.innerHTML = 'Recovery code added — WRITE IT DOWN (it is shown once):' +
           '<code class="big">' + code + '</code>' +
@@ -224,15 +169,9 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
 
     $('addPasskey').onclick = async () => {
       try {
-        log('Approve your CURRENT passkey (authorizes the change)…');
-        const { prf: existing } = await getPrf(currentCredId());
-        log('Now register a NEW passkey…');
-        const newId = await registerPasskey();
-        log('Deriving the new passkey’s PRF (approve again)…');
-        const { prf: fresh } = await getPrf(newId);
-        const r = await call({ type: 'add_passkey', prf: buf(existing), prf2: buf(fresh), blob: localStorage.getItem(LS_BLOB) }, []);
-        localStorage.setItem(LS_BLOB, r.blobHex);
-        syncButtons(); await refreshMethods();
+        log('Approve your CURRENT passkey, then register a NEW one (two prompts)…');
+        await vault.addPasskey();
+        await syncButtons(); await refreshMethods();
         log('Second passkey added — either passkey now opens the DB.', 'ok');
       } catch (e) { log('Add passkey failed: ' + (e.message || e), 'err'); }
     };
@@ -240,9 +179,8 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
     $('unlock').onclick = async () => {
       try {
         log('Asserting your passkey to re-derive the PRF…');
-        const { prf } = await getPrf(currentCredId());
-        const r = await call({ type: 'unlock', prf: buf(prf), blob: localStorage.getItem(LS_BLOB), epoch: localStorage.getItem(LS_EPOCH) || '' }, []);
-        log('UNLOCKED (passkey). Decrypted row:\n\n    ' + r.secret +
+        const secret = await vault.unlock();
+        log('UNLOCKED (passkey). Decrypted row:\n\n    ' + secret +
             '\n\nThe DEK was never stored — reconstructed from your passkey.', 'ok');
       } catch (e) { log('Unlock failed: ' + (e.message || e), 'err'); }
     };
@@ -252,19 +190,19 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
         const code = $('recoveryInput').value.trim();
         if (!code) throw new Error('paste a recovery code first');
         log('Deriving the recovery KEK (Argon2id) and opening the DB…');
-        const r = await call({ type: 'unlock_recovery', code, blob: localStorage.getItem(LS_BLOB), epoch: localStorage.getItem(LS_EPOCH) || '' });
-        log('UNLOCKED (recovery code). Decrypted row:\n\n    ' + r.secret +
+        const secret = await vault.unlockWithRecovery(code);
+        log('UNLOCKED (recovery code). Decrypted row:\n\n    ' + secret +
             '\n\nSame DEK, opened by the recovery method — no passkey needed.', 'ok');
       } catch (e) { log('Recovery unlock failed: ' + (e.message || e), 'err'); }
     };
 
     $('reset').onclick = async () => {
-      localStorage.removeItem(LS_CRED); localStorage.removeItem(LS_BLOB); localStorage.removeItem(LS_EPOCH);
-      syncButtons(); await refreshMethods();
+      await vault.reset();
+      await syncButtons(); await refreshMethods();
       log('Forgot the stored envelope. (Passkeys still live in your authenticator.)', 'muted');
     };
 
-    syncButtons(); refreshMethods();
+    await syncButtons(); await refreshMethods();
   </script>
 </body>
 </html>

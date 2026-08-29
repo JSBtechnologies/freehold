@@ -5,11 +5,13 @@ export const add_note: (a: number, b: number, c: number, d: number, e: number, f
 export const add_passkey: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const add_recovery: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const enroll: (a: number, b: number) => any;
-export const export_db: (a: number, b: number, c: number, d: number) => any;
+export const export_db: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
 export const gen_recovery: () => [number, number, number, number];
-export const import_db_image: (a: number, b: number) => any;
+export const import_bundle: (a: number, b: number) => any;
 export const list_methods: (a: number, b: number) => [number, number, number, number];
 export const remove_method: (a: number, b: number, c: number) => [number, number, number, number];
+export const run_sql: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => any;
+export const run_sql_recovery: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => any;
 export const run_tests: () => any;
 export const unlock: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
 export const unlock_recovery: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
