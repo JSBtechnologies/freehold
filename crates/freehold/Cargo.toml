@@ -1,10 +1,10 @@
 [package]
-name = "epochdb"
+name = "freehold"
 version = "0.1.0"
 edition = "2021"
 description = "Passkey-unlocked, header-free encrypted SQLite for the browser: XChaCha20-Poly1305 encrypting OPFS VFS, WebAuthn-PRF N-KEK envelope, anti-rollback sync-epoch anchor."
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/JSBtechnologies/epochdb"
+repository = "https://github.com/JSBtechnologies/freehold"
 keywords = ["sqlite", "wasm", "encryption", "webauthn", "local-first"]
 categories = ["cryptography", "database", "wasm"]
 # A header-free, whole-file-encrypted SQLite storage layer. Forks sqlite-wasm-vfs's `sahpool` VFS

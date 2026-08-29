@@ -350,7 +350,7 @@ partial-rollback prevention the deferred-tree v1 does not provide; see `adversar
 
 ## 11. Key lifecycle
 
-- **Injection:** DEK handed to the VFS at registration (e.g. `install_epochdb(cfg, dek)`),
+- **Injection:** DEK handed to the VFS at registration (e.g. `install_freehold(cfg, dek)`),
   held in a `zeroize::Zeroizing<[u8;32]>`. Never written to OPFS, never logged.
 - **Zeroize:** wipe DEK and any decrypted-page scratch buffers on DB close / lock / drop. Favors
   Rust (`Zeroize`/`ZeroizeOnDrop`). Cannot guarantee wasm linear memory is never paged, but
@@ -437,7 +437,7 @@ SQLite expects **logical** sizes; the physical file is larger (overhead `P−B` 
 
 ## 16. Implementation checklist (after review only)
 
-1. Vendor `sqlite-wasm-vfs` `sahpool` as `prototype/epochdb` (fork, keep upstream diff small).
+1. Vendor `sqlite-wasm-vfs` `sahpool` as `prototype/freehold` (fork, keep upstream diff small).
 2. Implement `EncryptedBlockDevice` (offset translation + `XChaCha20Poly1305` via generic `Aead`):
    `read_block`, `write_block` (whole + read-modify-write), `file_size`, `truncate`.
 3. Splice it between the sahpool `SQLiteIoMethods` and the sync-access-handle calls.

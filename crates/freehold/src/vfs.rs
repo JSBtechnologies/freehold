@@ -61,7 +61,7 @@ const HEADER_OFFSET_FLAGS: usize = HEADER_MAX_FILENAME_SIZE;
 const HEADER_OFFSET_DATA: usize = SECTOR_SIZE;
 
 // ENC (sync-epoch): AAD binding the epoch token to its purpose (sync-epoch-design §4).
-const EPOCH_AAD: &[u8] = b"epochdb-epoch";
+const EPOCH_AAD: &[u8] = b"freehold-epoch";
 
 const PERSISTENT_FILE_TYPES: i32 =
     SQLITE_OPEN_MAIN_DB | SQLITE_OPEN_MAIN_JOURNAL | SQLITE_OPEN_SUPER_JOURNAL | SQLITE_OPEN_WAL;
@@ -1845,8 +1845,8 @@ pub struct OpfsSAHPoolCfg {
 impl Default for OpfsSAHPoolCfg {
     fn default() -> Self {
         Self {
-            vfs_name: "epochdb".into(), // ENC: distinct default so it never shadows plain sahpool
-            directory: ".epochdb".into(),
+            vfs_name: "freehold".into(), // ENC: distinct default so it never shadows plain sahpool
+            directory: ".freehold".into(),
             clear_on_init: false,
             initial_capacity: 6,
         }
@@ -2026,7 +2026,7 @@ impl OpfsSAHPoolUtil {
     }
 }
 
-/// Register the encrypting `epochdb` VFS with the injected DEK and return a management tool.
+/// Register the encrypting `freehold` VFS with the injected DEK and return a management tool.
 ///
 /// ENC: the DEK (design-spec §11) is bound at registration and lives only inside the pool's `Crypto`
 /// (HKDF-derived subkey); it is never written to OPFS. If a VFS with `options.vfs_name` is already

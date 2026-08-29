@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/epochdb"]
+members = ["crates/freehold"]
 
 # rustc -O matters for cipher throughput; wasm-opt is skipped per-crate (crashes on Windows).
 [profile.release]

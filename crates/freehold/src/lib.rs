@@ -1,4 +1,4 @@
-//! EpochDB — passkey-unlocked, header-free encrypted SQLite for the browser.
+//! freehold — passkey-unlocked, header-free encrypted SQLite for the browser.
 //!
 //! `run_tests()` (exported to the worker) exercises the design-spec §14 cases M2 covers:
 //!   2   round-trip (write rows, reopen, rows intact)
@@ -286,7 +286,7 @@ with NO epoch opens the same stale image → the peer epoch is exactly what prev
 
 async fn run() -> std::result::Result<String, String> {
     let mut r = String::new();
-    r.push_str("epochdb Milestones 2+3 — anti-rollback + hardening + crash-injection/perf tests\n");
+    r.push_str("freehold Milestones 2+3 — anti-rollback + hardening + crash-injection/perf tests\n");
 
     // ---- M2 (passkey-PRF envelope): DEK is unwrapped from a PRF-derived KEK, not hardcoded -------
     // Automated with a MOCK PRF output (the real WebAuthn-PRF assertion needs a human gesture — see

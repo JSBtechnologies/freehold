@@ -1,12 +1,16 @@
-# EpochDB
+# Freehold DB
 
 **Passkey-unlocked, end-to-end-encrypted SQLite for the browser.** Your data lives encrypted in
 the browser's own storage (OPFS), unlocks with a hardware-bound passkey (WebAuthn PRF), and moves
 between your devices as a key-free bundle — **no server ever sees a key**.
 
-The name comes from the **sync-epoch anchor**: peer-attested freshness tokens that turn storage
-rollback from something you *detect* into something the database *refuses* — verified live across
-two physical devices.
+> Cloud storage is a leasehold: you occupy, someone else holds title.
+> A **freehold** is property you own outright — no landlord, no lease, no one else's key.
+
+Freehold DB is the first part of the Freehold family: **Freehold DB** (this repo — the local
+encrypted database), **Freehold Sync** (server-blind synchronization), and **Freehold Grid**
+(idle-time Wasm/WebGPU compute across your own devices). DB is the foundation; the others build
+on its keys and sync-epoch machinery.
 
 ## What's inside
 
@@ -30,8 +34,8 @@ two physical devices.
 
 | Mode | How | Status |
 |---|---|---|
-| **Rust crate** (`epochdb`) | Vendor the VFS/envelope in your own Rust→Wasm app; build with `default-features = false` to compile out the test/fault-injection surface. | working |
-| **Wasm + JS** | `wasm-pack build crates/epochdb --target web` produces an npm-shaped `pkg/`; drive it from a worker like `examples/demo` does. | working (prebuilt copy committed in `examples/demo/pkg`) |
+| **Rust crate** (`freehold`) | Vendor the VFS/envelope in your own Rust→Wasm app; build with `default-features = false` to compile out the test/fault-injection surface. | working |
+| **Wasm + JS** | `wasm-pack build crates/freehold --target web` produces an npm-shaped `pkg/`; drive it from a worker like `examples/demo` does. | working (prebuilt copy committed in `examples/demo/pkg`) |
 | **Demo app** | `examples/demo` — self-test harness + full passkey enroll/unlock/export/import UI. | working |
 
 A polished npm package with a high-level JS/TS API (ceremony + worker plumbing wrapped) is the next
@@ -61,7 +65,7 @@ WebAuthn needs a secure context — `localhost` qualifies. You need a platform a
 The point of the design: unlock the same DB on another device with no server ever seeing the key.
 
 1. **Device A** (`/passkey.html`): **Enroll** → **Add recovery code** (write it down) → **Export
-   bundle** (downloads `epochdb-bundle.json` — envelope + encrypted DB image, **no key inside**).
+   bundle** (downloads `freehold-bundle.json` — envelope + encrypted DB image, **no key inside**).
 2. Copy the JSON to **Device B** and **Import** it there.
 3. Unlock on B with the **synced passkey** (provider-dependent — confirmed for Chrome + Google
    Password Manager) or the **recovery code** (device-independent by construction; always works).
@@ -76,7 +80,7 @@ Requires Rust, [`wasm-pack`](https://rustwasm.github.io/wasm-pack/), and clang/L
 sources compile to wasm via `cc`):
 
 ```bash
-wasm-pack build crates/epochdb --target web --release --out-dir ../../examples/demo/pkg
+wasm-pack build crates/freehold --target web --release --out-dir ../../examples/demo/pkg
 cd examples/demo && npm install && npm run dev
 ```
 
@@ -84,11 +88,11 @@ cd examples/demo && npm install && npm run dev
 
 | Path | What |
 |---|---|
-| `crates/epochdb/src/crypto.rs` | trusted crypto core (per-block AEAD, HKDF subkeys, RNG gate) |
-| `crates/epochdb/src/manifest.rs` | anti-rollback manifest + freshness-anchor formats |
-| `crates/epochdb/src/vfs.rs` | forked SAHPool VFS with the encrypted block device spliced in |
-| `crates/epochdb/src/envelope.rs` | passkey-PRF / recovery-code N-KEK envelope |
-| `crates/epochdb/src/lib.rs` | wasm entry points: `run_tests`, enroll/unlock, export/import |
+| `crates/freehold/src/crypto.rs` | trusted crypto core (per-block AEAD, HKDF subkeys, RNG gate) |
+| `crates/freehold/src/manifest.rs` | anti-rollback manifest + freshness-anchor formats |
+| `crates/freehold/src/vfs.rs` | forked SAHPool VFS with the encrypted block device spliced in |
+| `crates/freehold/src/envelope.rs` | passkey-PRF / recovery-code N-KEK envelope |
+| `crates/freehold/src/lib.rs` | wasm entry points: `run_tests`, enroll/unlock, export/import |
 | `examples/demo/` | self-test harness + passkey demo (Vite) |
 | `docs/design-spec.md` | the VFS design spec (v1.1) |
 | `docs/sync-epoch-design.md` | peer-attested anti-rollback design |
@@ -98,14 +102,15 @@ cd examples/demo && npm install && npm run dev
 ## Status & lineage
 
 Research-grade, pre-release. Grown from the `enc-sahpool` prototype; all format identity strings
-were rebranded at the fork (`epochdb-*-v1`, envelope magic `EPDBENV2`), so **bundles/DBs created by
+were rebranded at the fork (`freehold-*-v1`, envelope magic `FREEHOLD`), so **bundles/DBs created by
 the old prototype do not open here** — re-enroll. Crypto is audited RustCrypto used as-is; the
 design and its limits are documented honestly in `docs/BUILD-NOTES.md`. Not yet independently
 audited — don't bet lives on it.
 
 ## Roadmap
 
-- High-level npm package (`epochdb` on npm): TS API wrapping the worker + passkey ceremony.
+- High-level npm package (`@freehold/db`): TS API wrapping the worker + passkey ceremony. (The
+  bare `freehold` npm name is squatted by a dead 2022 package; the scope is ours.)
 - BIP39 checksummed recovery phrases (currently Crockford-Base32).
 - Broader PRF-stability matrix: iCloud Keychain, 1Password, mobile, roaming keys.
 - "Adv Mode": chunk sharding of the encrypted DB across your own devices/peers.

@@ -1,4 +1,4 @@
-# epochdb — build notes & honest §17 ledger
+# freehold — build notes & honest §17 ledger
 
 **What this is.** Milestones 1+2+3 of the header-free encrypting VFS from
 `topics/header-free-encrypted-vfs/design-spec.md` (v1.1). It forks `sqlite-wasm-vfs` 0.2.0's
@@ -25,9 +25,9 @@ AAD (45 bytes)        = file_id(16) || key_domain(16) || block_index_LE(8) || B_
   * key_domain = owning DB's db_uuid  (zeros for pool/temp; security-review M1/3d — redundant
                  cross-DB bind on top of key separation, so a transplanted block fails the AAD too)
 
-per-DB block key      = K_db = HKDF-SHA256(DEK, "epochdb/vfs-db-v1\0" ‖ db_uuid)  (§17.E)
-pool-domain key       = HKDF(DEK, "epochdb-v1")        (files with no owning DB, e.g. temp)
-anchor key            = HKDF(DEK, "epochdb-anchor-v1")
+per-DB block key      = K_db = HKDF-SHA256(DEK, "freehold/vfs-db-v1\0" ‖ db_uuid)  (§17.E)
+pool-domain key       = HKDF(DEK, "freehold-v1")        (files with no owning DB, e.g. temp)
+anchor key            = HKDF(DEK, "freehold-anchor-v1")
 
 manifest (pool file "<db>#manifest", SQLite never opens it):
   [ magic "ENCMFST1"(8) | db_uuid(16) | pad(40) | slot0 (P bytes) | slot1 (P bytes) ]

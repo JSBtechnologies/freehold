@@ -5,11 +5,11 @@ version: 1.0
 status: complete
 created: 2026-08-28
 parent: header-free-encrypted-vfs/design-spec.md
-reviews: prototype/epochdb (Milestones 1–3)
+reviews: prototype/freehold (Milestones 1–3)
 method: 3 independent adversarial red-team agents (crypto-construction / crash-consistency / leak+memory-safety)
 ---
 
-# Security review — epochdb encrypting VFS (M1–M3)
+# Security review — freehold encrypting VFS (M1–M3)
 
 Three independent red-team agents attacked the built prototype (not the spec), each told to
 **disprove** the guarantees. This document adjudicates every finding: what was confirmed, what was

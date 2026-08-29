@@ -46,13 +46,13 @@ DEK-derived key — any of the user's devices can mint and verify it, an attacke
 cannot forge one.
 
 ```
-K_epoch  = HKDF(DEK, "epochdb-epoch-v1")
+K_epoch  = HKDF(DEK, "freehold-epoch-v1")
 epoch token (per db_uuid) = seal(K_epoch, nonce, plaintext = {
     db_uuid   : 16,
     generation: u64,     // the db_generation this device last committed
     device_id : 16,      // random per-install id (distinguishes this device's line)
     stamp     : u64,     // monotonic-ish wall clock, tiebreak only (not security-load-bearing)
-}, aad = "epochdb-epoch" || db_uuid)
+}, aad = "freehold-epoch" || db_uuid)
 ```
 *(v2/multi-USER would need real per-device signing keys — a device shouldn't be able to forge another
 user's epoch. Out of scope for single-user v1; noted so we don't design it away.)*
@@ -93,7 +93,7 @@ That's the design: freshness lives in the union of the user's devices, not in an
 Everything else follows. On sign-off, build §6.
 
 ## Build status (2026-08-28)
-Stakeholder signed off D-SE1/2/3. **First increment implemented** in `prototype/epochdb`
+Stakeholder signed off D-SE1/2/3. **First increment implemented** in `prototype/freehold`
 (compiles clean, dev + release):
 - `crypto.rs`: `epoch_key(DEK)` + general `seal_bytes`/`open_bytes` (small-payload AEAD).
 - `vfs.rs`: per-install `device_id`; `export_epoch(db)` → sealed `{db_uuid, generation, device_id}`;
@@ -110,7 +110,7 @@ Stakeholder signed off D-SE1/2/3. **First increment implemented** in `prototype/
   the rollback ✅". Mechanism proven. All M2/M3/crash/audit checks still pass on the same build.
 
 **Scope (updated 2026-08-28):** the epoch *mechanism* is proven via the 3-pool automated test
-(`SE.` green). **Bundle/demo wiring DONE + pushed** (`JSBtechnologies/epochdb` @ f39ff64,
+(`SE.` green). **Bundle/demo wiring DONE + pushed** (`JSBtechnologies/freehold` @ f39ff64,
 release wasm): `export_db` appends a `#epoch|<hex>` line (mints the token — needs the passkey);
 `import_db_image` returns the peer epoch (page stores it); `unlock`/`unlock_recovery` apply it before
 open; the `Add data (new version)` button advances the generation to create a v1/v2 pair.

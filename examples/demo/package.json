@@ -1,8 +1,8 @@
 {
-  "name": "epochdb-demo",
+  "name": "freehold-demo",
   "private": true,
   "type": "module",
-  "description": "EpochDB demo: VFS self-test harness (/) and passkey-PRF unlock demo (/passkey.html), served over the prebuilt wasm in ./pkg.",
+  "description": "freehold demo: VFS self-test harness (/) and passkey-PRF unlock demo (/passkey.html), served over the prebuilt wasm in ./pkg.",
   "scripts": {
     "dev": "vite"
   },
