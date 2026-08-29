@@ -23,6 +23,7 @@ mod bundle;
 mod crypto;
 mod envelope;
 mod manifest;
+mod sync;
 mod vfs;
 
 use sqlite_wasm_rs as ffi;
@@ -291,6 +292,258 @@ async fn sync_epoch_test() -> std::result::Result<String, String> {
 the fresh state) applies the peer epoch then is fed the STALE image → open REJECTED; contrast device \
 with NO epoch opens the same stale image → the peer epoch is exactly what prevents the rollback \u{2705}"
     ))
+}
+
+/// Export DB `db_name` from `util`'s pool as `.freehold` bundle bytes (the sync blob `image`).
+/// `export_bundle` yields `name|hex` text of the encrypted files; we re-encode those into the real
+/// binary TLV bundle (`bundle.rs`) — no envelope/cred_id/epoch section (sync carries only the image).
+fn export_image(util: &OpfsSAHPoolUtil, db_name: &str) -> std::result::Result<Vec<u8>, String> {
+    let text = util
+        .export_bundle(db_name)
+        .map_err(|e| format!("export_bundle {db_name}: {e:?}"))?;
+    let files: Vec<(String, Vec<u8>)> = text
+        .lines()
+        .filter_map(|l| l.split_once('|'))
+        .map(|(n, h)| Ok::<_, String>((n.to_string(), hex_to_bytes(h)?)))
+        .collect::<std::result::Result<_, _>>()?;
+    // Envelope section is empty here: the image is pure ciphertext, decrypted later under the DEK.
+    Ok(bundle::encode(&[], &[], &files, &[]))
+}
+
+/// Inverse of [`export_image`]: decode a `.freehold` bundle and write its ciphertext files into
+/// `util`'s pool via `import_files`. Opening them still needs the DEK.
+fn import_image(util: &OpfsSAHPoolUtil, image: &[u8]) -> std::result::Result<(), String> {
+    let b = bundle::decode(image).map_err(|e| format!("bundle decode: {e}"))?;
+    util.import_files(&b.files)
+        .map_err(|e| format!("import_files: {e:?}"))
+}
+
+/// Section SY — Freehold Sync FIRST proof increment (freehold-sync-design §7/§7.1/§10). Proves the
+/// ordering + conflict semantics against a blind-relay mock with N pool-dirs-as-devices, exactly as
+/// the sync-epoch mechanism was proven before real hardware. NO server/P2P/browser wiring here.
+///
+/// All three devices share `DEK_OK` (single-user model: every device holds the DEK). Each device
+/// has its own random 16-byte `device_id`. One logical DB (fixed test `db_uuid`) → one `sync_id`.
+async fn sync_test() -> std::result::Result<String, String> {
+    use sync::{reconcile, InMemoryRelay, MergeOutcome, SyncBlob, VersionVector};
+    const SYDB: &str = "sy.db";
+
+    // Sanity: the version-vector algebra + reconcile determinism, before the device dance.
+    sync::self_check()?;
+
+    // One logical DB → one relay bucket. sync_id is opaque to the relay, derived off the shared DEK.
+    let db_uuid: [u8; 16] = *b"freehold-sy-uuid";
+    let sync_id = crypto::sync_id(&DEK_OK, &db_uuid);
+    let sync = crypto::Crypto::sync_key(&DEK_OK);
+    let mut relay = InMemoryRelay::new();
+
+    // Per-device random device_ids (getrandom — same RNG the crypto core fails closed on).
+    let mut dev_a = [0u8; 16];
+    let mut dev_b = [0u8; 16];
+    getrandom::getrandom(&mut dev_a).map_err(|_| "rng dev_a".to_string())?;
+    getrandom::getrandom(&mut dev_b).map_err(|_| "rng dev_b".to_string())?;
+
+    // ---------------- (a) CONVERGE: A creates + inserts, pushes; B (fresh) pulls + fast-forwards ----
+    let a = install_dir("sy-a", "sync-a", true, &DEK_OK).await?;
+    unsafe {
+        let db = open_default(SYDB)?;
+        set_pragmas(db)?;
+        exec(db, "CREATE TABLE t(v TEXT)")?;
+        exec(db, "INSERT INTO t(v) VALUES ('alpha')")?;
+        ffi::sqlite3_close(db);
+    }
+    let mut vv_a = VersionVector::new();
+    vv_a.increment(&dev_a); // A's local vv = {A:1}
+    let image_a0 = export_image(&a, SYDB)?;
+    let blob_a0 = SyncBlob { db_uuid, vv: vv_a.clone(), image: image_a0.clone() };
+    let sealed_a0 = blob_a0.seal(&sync).map_err(|e| format!("seal a0: {e:?}"))?;
+    relay.put(sync_id, sealed_a0);
+    a.pause_vfs().map_err(|e| format!("pause A: {e:?}"))?;
+
+    // B pulls: blind LIST/GET, open (authenticated), reconcile(empty, {A:1}) → FastForward, import.
+    let b = install_dir("sy-b", "sync-b", true, &DEK_OK).await?;
+    let mut vv_b = VersionVector::new(); // B starts empty
+    let mut b_cursor = 0usize;
+    let new_for_b = relay.list(&sync_id, b_cursor);
+    if new_for_b != 1 {
+        return Err(format!("SY(a): B expected 1 new blob, saw {new_for_b}"));
+    }
+    let sealed = relay
+        .get(&sync_id, b_cursor)
+        .ok_or("SY(a): relay.get miss")?;
+    let incoming = SyncBlob::open(&sealed, &sync)?;
+    b_cursor += 1; // advance the pull cursor past the blob we just consumed
+    if relay.list(&sync_id, b_cursor) != 0 {
+        return Err("SY(a): B's cursor should be caught up after one pull".into());
+    }
+    match reconcile(&vv_b, &incoming.vv) {
+        MergeOutcome::FastForward => {}
+        other => return Err(format!("SY(a): expected FastForward, got {other:?}")),
+    }
+    import_image(&b, &incoming.image)?;
+    vv_b.merge_max(&incoming.vv); // B's vv becomes {A:1}
+    let converged = unsafe {
+        let db = open_default(SYDB)?;
+        let got = scalar_text(db, "SELECT v FROM t LIMIT 1")?;
+        ffi::sqlite3_close(db);
+        got
+    };
+    if converged != "alpha" {
+        return Err(format!("SY(a): B read back '{converged}', expected 'alpha'"));
+    }
+    if vv_b.relation(&vv_a) != sync::Relation::Equal {
+        return Err("SY(a): B's vv should equal {A:1} after fast-forward".into());
+    }
+    b.pause_vfs().map_err(|e| format!("pause B: {e:?}"))?;
+
+    // ---------------- (b) STALE: incoming {A:1} vs a strictly-greater local {A:2} → rejected -------
+    // Model B having advanced to {A:2}; A pushes an older/equal {A:1} state. reconcile must reject.
+    let mut vv_b2 = VersionVector::new();
+    vv_b2.increment(&dev_a);
+    vv_b2.increment(&dev_a); // local = {A:2}
+    let vv_stale = vv_a.clone(); // incoming = {A:1}
+    match reconcile(&vv_b2, &vv_stale) {
+        MergeOutcome::Stale => {}
+        other => return Err(format!("SY(b): expected Stale, got {other:?}")),
+    }
+
+    // ---------------- (c) FORK (headline): shared base {A:1}; A and B commit INDEPENDENTLY ---------
+    // Shared base = image_a0 (the {A:1} state) present on both A and B. Each commits locally.
+    //   A: {A:1} → {A:2}, image_A (adds 'from-A')
+    //   B: {A:1} → {A:1,B:1}, image_B (adds 'from-B')
+    // A device is a fresh pool seeded with the base image, then a local commit on top.
+    async fn commit_on_base(
+        vfs_name: &str,
+        dir: &str,
+        base_image: &[u8],
+        extra_sql: &str,
+    ) -> std::result::Result<(OpfsSAHPoolUtil, Vec<u8>), String> {
+        let util = install_dir(vfs_name, dir, true, &DEK_OK).await?;
+        import_image(&util, base_image)?;
+        unsafe {
+            let db = open_default(SYDB)?;
+            set_pragmas(db)?;
+            exec(db, extra_sql)?;
+            ffi::sqlite3_close(db);
+        }
+        let img = export_image(&util, SYDB)?;
+        Ok((util, img))
+    }
+
+    // A commits: vv {A:2}
+    let (fa, image_a) = commit_on_base("sy-fa", "sync-fa", &image_a0, "INSERT INTO t(v) VALUES ('from-A')").await?;
+    let mut vv_fork_a = VersionVector::new();
+    vv_fork_a.increment(&dev_a);
+    vv_fork_a.increment(&dev_a); // {A:2}
+    let blob_a = SyncBlob { db_uuid, vv: vv_fork_a.clone(), image: image_a.clone() };
+    let sealed_a = blob_a.seal(&sync).map_err(|e| format!("seal fork A: {e:?}"))?;
+
+    // B commits: vv {A:1,B:1}
+    let (fb, image_b) = commit_on_base("sy-fb", "sync-fb", &image_a0, "INSERT INTO t(v) VALUES ('from-B')").await?;
+    let mut vv_fork_b = VersionVector::new();
+    vv_fork_b.increment(&dev_a); // inherited base commit belongs to A
+    vv_fork_b.increment(&dev_b); // B's own commit
+    let blob_b = SyncBlob { db_uuid, vv: vv_fork_b.clone(), image: image_b.clone() };
+    let sealed_b = blob_b.seal(&sync).map_err(|e| format!("seal fork B: {e:?}"))?;
+
+    fa.pause_vfs().map_err(|e| format!("pause fa: {e:?}"))?;
+    fb.pause_vfs().map_err(|e| format!("pause fb: {e:?}"))?;
+
+    // Both push; then A pulls B's blob and B pulls A's blob.
+    relay.put(sync_id, sealed_a.clone());
+    relay.put(sync_id, sealed_b.clone());
+
+    // A-side reconcile: local {A:2}, incoming {A:1,B:1} (B's blob).
+    let a_incoming = SyncBlob::open(&sealed_b, &sync)?;
+    let a_outcome = reconcile(&vv_fork_a, &a_incoming.vv);
+    // B-side reconcile: local {A:1,B:1}, incoming {A:2} (A's blob).
+    let b_incoming = SyncBlob::open(&sealed_a, &sync)?;
+    let b_outcome = reconcile(&vv_fork_b, &b_incoming.vv);
+
+    let (a_win_incoming, b_win_incoming) = match (a_outcome, b_outcome) {
+        (MergeOutcome::Fork { winner_is_incoming: aw }, MergeOutcome::Fork { winner_is_incoming: bw }) => (aw, bw),
+        other => return Err(format!("SY(c): expected Fork on BOTH sides, got {other:?}")),
+    };
+    // The device holding the loser adopts the winner; the device holding the winner keeps it — so
+    // winner_is_incoming must be OPPOSITE on the two sides (one adopts, one keeps).
+    if a_win_incoming == b_win_incoming {
+        return Err(format!(
+            "SY(c): winner_is_incoming must differ across sides (A={a_win_incoming} B={b_win_incoming}) — non-deterministic!"
+        ));
+    }
+
+    // Resolve each side to the WINNER image bytes and the LOSER (preserved) image bytes.
+    // A side: incoming = image_b, local = image_a.
+    let (a_winner_img, a_loser_img) = if a_win_incoming {
+        (a_incoming.image.clone(), image_a.clone())
+    } else {
+        (image_a.clone(), a_incoming.image.clone())
+    };
+    // B side: incoming = image_a, local = image_b.
+    let (b_winner_img, b_loser_img) = if b_win_incoming {
+        (b_incoming.image.clone(), image_b.clone())
+    } else {
+        (image_b.clone(), b_incoming.image.clone())
+    };
+
+    // Convergence: both devices hold the IDENTICAL winner image.
+    if a_winner_img != b_winner_img {
+        return Err("SY(c): devices selected DIFFERENT winner images — no convergence!".into());
+    }
+    // Loser preserved on both sides: non-empty and distinct from the winner.
+    if a_loser_img.is_empty() || b_loser_img.is_empty() {
+        return Err("SY(c): a loser image was empty — fork not preserved".into());
+    }
+    if a_loser_img == a_winner_img || b_loser_img == b_winner_img {
+        return Err("SY(c): loser image equals winner — fork collapsed, not preserved".into());
+    }
+    // Both devices converge on the SAME winner AND preserve the SAME losing sibling — the loser
+    // must be identical across devices (both retain the one non-winning image), and it must be one
+    // of the two real fork images, not something else.
+    if a_loser_img != b_loser_img {
+        return Err("SY(c): devices preserved DIFFERENT loser images — divergent fork state".into());
+    }
+    let loser = &a_loser_img;
+    let winner = &a_winner_img;
+    // The pair {winner, loser} must be exactly {image_a, image_b} (the two committed siblings).
+    let pair_ok = (winner == &image_a && loser == &image_b) || (winner == &image_b && loser == &image_a);
+    if !pair_ok {
+        return Err("SY(c): winner/loser are not the two committed fork images".into());
+    }
+
+    // After resolution BOTH devices set vv = merge_max({A:2},{A:1,B:1}) = {A:2,B:1}, so the fork
+    // does not re-trigger. Verify the merged vector is identical on both sides.
+    let mut vv_a_after = vv_fork_a.clone();
+    vv_a_after.merge_max(&a_incoming.vv);
+    let mut vv_b_after = vv_fork_b.clone();
+    vv_b_after.merge_max(&b_incoming.vv);
+    if vv_a_after.relation(&vv_b_after) != sync::Relation::Equal {
+        return Err("SY(c): merged vectors differ across devices — would re-trigger fork".into());
+    }
+    let mut vv_expected = VersionVector::new();
+    vv_expected.increment(&dev_a);
+    vv_expected.increment(&dev_a);
+    vv_expected.increment(&dev_b); // {A:2,B:1}
+    if vv_a_after.relation(&vv_expected) != sync::Relation::Equal {
+        return Err("SY(c): merged vector != expected {A:2,B:1}".into());
+    }
+
+    // Determinism cross-check: the winner is a pure function of the pair, independent of arg order.
+    let r1 = reconcile(&vv_fork_a, &vv_fork_b);
+    let r2 = reconcile(&vv_fork_b, &vv_fork_a);
+    match (r1, r2) {
+        (MergeOutcome::Fork { winner_is_incoming: w1 }, MergeOutcome::Fork { winner_is_incoming: w2 }) => {
+            if w1 == w2 {
+                return Err("SY(c): reconcile not arg-order-symmetric".into());
+            }
+        }
+        _ => return Err("SY(c): reconcile determinism cross-check not a Fork".into()),
+    }
+
+    Ok(
+        "SY. sync (blind-relay mock, 3 devices): fast-forward converges | stale rejected | concurrent fork \u{2192} identical winner on both devices + loser preserved \u{2705}"
+            .to_string(),
+    )
 }
 
 /// Section S — the session model, driven exactly as the SDK drives it but with a MOCK PRF (no
@@ -865,6 +1118,10 @@ async fn run() -> std::result::Result<String, String> {
 
     // ---- Sync-epoch anchor (peer-attested rollback prevention) ---------------------------------
     r.push_str(&sync_epoch_test().await?);
+    r.push('\n');
+
+    // ---- Section SY: Freehold Sync ordering + fork semantics (blind-relay mock) -----------------
+    r.push_str(&sync_test().await?);
     r.push('\n');
 
     // ---- Section S: the session model (mock PRF — no gesture) ----------------------------------

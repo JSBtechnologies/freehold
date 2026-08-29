@@ -114,6 +114,36 @@ impl Crypto {
         Self::from_info(dek, b"freehold-epoch-v1")
     }
 
+    /// Subkey sealing the cross-device **sync blob** (freehold-sync-design §5/§10). The sync layer
+    /// wraps the already-encrypted `.freehold` bundle plus its sync metadata (version vector) under
+    /// this key so a blind relay stores only ciphertext (§3 leakage bound). Domain-separated from
+    /// every other subkey; any of a user's devices (all sharing the DEK) can seal/open, an attacker
+    /// without the DEK cannot. This adds NO new cryptography — same `seal_bytes`/`open_bytes` AEAD.
+    pub fn sync_key(dek: &[u8; 32]) -> Self {
+        Self::from_info(dek, b"freehold-sync-v1")
+    }
+}
+
+/// The opaque per-database **sync-id** used to name a user's blob bucket on the blind relay
+/// (freehold-sync-design §4): `sync_id = HKDF(DEK, "freehold-sync-id-v1" ‖ db_uuid)`, truncated to
+/// 128 bits. Deterministic across the user's devices (they share the DEK), unlinkable to identity,
+/// and unnameable without the DEK — the relay routes blobs under it but learns nothing from it.
+///
+/// This is derived directly off the DEK (not a `Crypto` cipher instance) because it is a public
+/// routing label, not a key; it never seals anything.
+pub fn sync_id(dek: &[u8; 32], db_uuid: &[u8; 16]) -> [u8; 16] {
+    let mut info = [0u8; 19 + 16];
+    info[..19].copy_from_slice(b"freehold-sync-id-v1");
+    info[19..].copy_from_slice(db_uuid);
+    let hk = Hkdf::<Sha256>::new(None, dek);
+    let mut out = [0u8; 16];
+    hk.expand(&info, &mut out)
+        .expect("HKDF expand of 16 bytes never fails");
+    out
+}
+
+impl Crypto {
+
     /// General small-payload AEAD seal for variable-length authenticated blobs (epoch tokens, etc.).
     /// Output = `nonce(24) || ciphertext || tag(16)`. Fresh random nonce, fail-closed (§17.F).
     pub fn seal_bytes(&self, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
