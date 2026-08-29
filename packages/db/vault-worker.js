@@ -11,6 +11,9 @@ const OPS = new Set([
   'import_bundle',
   'session_open', 'session_open_recovery', 'session_lock', 'session_active',
   'session_sql', 'session_export',
+  // Freehold Sync (freehold-sync-design §10 item 3): crypto + conflict logic in wasm; the loop in JS.
+  'session_sync_id', 'session_sync_seal', 'session_sync_open', 'session_sync_apply',
+  'sync_vv_empty', 'sync_vv_increment', 'sync_vv_merge', 'sync_reconcile',
 ]);
 
 // Hand result buffers back by transfer where possible (bundles can be MBs — don't copy them twice).

@@ -5,9 +5,15 @@
   "type": "module",
   "main": "./index.js",
   "types": "./index.d.ts",
+  "exports": {
+    ".": { "types": "./index.d.ts", "default": "./index.js" },
+    "./relay-mem": { "types": "./relay-mem.d.ts", "default": "./relay-mem.js" }
+  },
   "files": [
     "index.js",
     "index.d.ts",
+    "relay-mem.js",
+    "relay-mem.d.ts",
     "vault-worker.js",
     "README.md"
   ],
@@ -18,7 +24,10 @@
     "webauthn",
     "passkey",
     "opfs",
-    "local-first"
+    "local-first",
+    "sync",
+    "e2e-encryption",
+    "server-blind"
   ],
   "license": "MIT OR Apache-2.0",
   "repository": {

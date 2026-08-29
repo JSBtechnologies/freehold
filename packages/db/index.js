@@ -12,6 +12,11 @@
 const PRF_SALT = new TextEncoder().encode('freehold/passkey-prf/v1');
 const DEFAULT_RP_NAME = 'freehold demo';
 
+// The whole-vault sync bucket is scoped by the DEK, so a FIXED 16-byte db_uuid is correct: every
+// device sharing the DEK derives the SAME sync_id = HKDF(DEK, db_uuid); different users (different
+// DEK) never collide. Exactly 16 bytes — a protocol constant, do not change (it re-buckets everyone).
+const SYNC_DB_UUID = new TextEncoder().encode('freehold/vault/1');
+
 const rand = (n) => crypto.getRandomValues(new Uint8Array(n));
 
 // ---- passkey ceremony helpers (exported — apps may drive the ceremony themselves) ----
@@ -89,6 +94,7 @@ export class FreeholdVault {
   #releaseLock = null;   // resolves the Web Lock's callback promise (held until close())
   #lockAfterMs = 0;      // rolling inactivity auto-lock; 0 = disabled
   #lockTimer = null;
+  #forkListeners = new Set();  // onFork() callbacks, invoked when sync() detects/resolves a fork
 
   /** Did the browser grant persistent storage? (navigator.storage.persist(), non-fatal.) */
   persisted = Promise.resolve(false);
@@ -327,12 +333,118 @@ export class FreeholdVault {
     return meta;
   }
 
+  // ---- Freehold Sync (freehold-sync-design §10 item 3) ----
+  // Server-blind, epoch-ordered replication over a pluggable BlindRelay. The DB seals/opens blobs and
+  // classifies conflicts in wasm (proven engine); this loop only orchestrates transport + persistence.
+  // Per-device state (all non-secret) lives in IndexedDB: a stable random deviceId, the local version
+  // vector (lineage), the relay pull-cursor, and any preserved fork blobs.
+
+  async #deviceId() {
+    let id = await idbGet('syncDeviceId');
+    if (!id) { id = rand(16); await idbSet('syncDeviceId', id); }
+    return id;
+  }
+  async #syncVv() { return (await idbGet('syncVv')) || await this.#call('sync_vv_empty'); }
+  async #syncCursor() { return (await idbGet('syncCursor')) || 0; }
+  async #syncForks() { return (await idbGet('syncForks')) || []; }
+
+  /** Register a callback fired when sync() detects a fork (concurrent offline edits). It receives
+   *  `{ id, winner: 'local'|'incoming' }`. The loser is preserved — see listForks()/openFork(). */
+  onFork(cb) { this.#forkListeners.add(cb); return () => this.#forkListeners.delete(cb); }
+
+  /** Preserved fork siblings (the LWW losers, never silently dropped): `[{ id }]`. Recover the bytes
+   *  with openFork(id). */
+  async listForks() { return (await this.#syncForks()).map((f) => ({ id: f.id })); }
+
+  /** Recover a preserved fork's decrypted contents: resolves to `{ dbUuid, vv, image }` (the image is
+   *  the `.freehold` bundle bytes of the losing sibling). Requires an open session. Throws if unknown. */
+  async openFork(id) {
+    if (!(await this.isUnlocked())) throw new Error('vault is locked — unlock() before openFork()');
+    const f = (await this.#syncForks()).find((x) => x.id === id);
+    if (!f) throw new Error('unknown fork id: ' + id);
+    return this.#call('session_sync_open', [f.sealed]);
+  }
+
+  /**
+   * Pull new blobs from the relay, reconcile each against local state (fast-forward / stale / fork),
+   * apply winners into the live session, preserve fork losers, then push the current state. Blobs on
+   * the wire are ciphertext sealed under a DEK-subkey; the relay only ever sees opaque bytes.
+   * `relay` implements the BlindRelay contract (put/list/get) — e.g. `new InMemoryRelay()`.
+   * `{ push = true }` — set false to pull-only. Resolves to a report `{ pushed, pulled, applied, forks }`.
+   */
+  async sync({ relay, push = true } = {}) {
+    if (!relay) throw new Error('sync: a relay is required (e.g. new InMemoryRelay())');
+    if (!(await this.isUnlocked())) throw new Error('vault is locked — unlock() before sync()');
+    this.#touch();
+
+    const syncId = await this.#call('session_sync_id', [SYNC_DB_UUID]);
+    const deviceId = await this.#deviceId();
+    let localVv = await this.#syncVv();
+    let cursor = await this.#syncCursor();
+    const forks = await this.#syncForks();
+    const report = { pushed: false, pulled: 0, applied: 0, forks: 0 };
+
+    // ---- PULL: consume every blob at seq ≥ cursor, reconcile in order ----
+    const count = await relay.list(syncId, cursor);
+    for (let i = 0; i < count; i++) {
+      const sealed = await relay.get(syncId, cursor + i);
+      if (!sealed) continue;
+      report.pulled++;
+      const incoming = await this.#call('session_sync_open', [sealed]);
+      const rec = await this.#call('sync_reconcile', [localVv, incoming.vv]);
+      if (rec.outcome === 'fastforward') {
+        await this.#call('session_sync_apply', [incoming.image]);
+        localVv = await this.#call('sync_vv_merge', [localVv, incoming.vv]);
+        report.applied++;
+      } else if (rec.outcome === 'stale') {
+        // our state already dominates — ignore
+      } else { // fork: deterministic winner; the loser is PRESERVED, never dropped
+        let loserSealed, winner;
+        if (rec.winnerIsIncoming) {
+          // incoming wins → preserve our current LOCAL state as the fork, then apply incoming
+          loserSealed = await this.#call('session_sync_seal', [SYNC_DB_UUID, localVv]);
+          await this.#call('session_sync_apply', [incoming.image]);
+          winner = 'incoming';
+        } else {
+          // local wins → the INCOMING blob is the loser; keep it as-is (already sealed)
+          loserSealed = sealed;
+          winner = 'local';
+        }
+        localVv = await this.#call('sync_vv_merge', [localVv, incoming.vv]);
+        const id = 'fork-' + (cursor + i) + '-' + forks.length;
+        forks.push({ id, sealed: loserSealed });
+        report.forks++;
+        for (const cb of this.#forkListeners) { try { cb({ id, winner }); } catch { /* listener error is not ours */ } }
+      }
+    }
+    cursor += count;
+
+    // ---- PUSH: publish the current (post-merge) state under an incremented device component ----
+    // v1.0 pushes every sync so peers always converge; de-duping unchanged state is a v1.1 optimization.
+    if (push) {
+      localVv = await this.#call('sync_vv_increment', [localVv, deviceId]);
+      const blob = await this.#call('session_sync_seal', [SYNC_DB_UUID, localVv]);
+      await relay.put(syncId, blob);
+      cursor = await relay.list(syncId, 0); // we've now seen everything up to and including our push
+      report.pushed = true;
+    }
+
+    await idbSet('syncVv', localVv);
+    await idbSet('syncCursor', cursor);
+    await idbSet('syncForks', forks);
+    return report;
+  }
+
   /** Forget the stored envelope/credId/epoch. (Passkeys still live in the authenticator; the
    *  encrypted OPFS files are untouched but unopenable without the envelope.) */
   async reset() {
     await idbDel('envelope');
     await idbDel('credId');
     await idbDel('epoch');
+    // Forget sync lineage too (the DB is being forgotten). deviceId is kept — it's a stable identity.
+    await idbDel('syncVv');
+    await idbDel('syncCursor');
+    await idbDel('syncForks');
   }
 
   /** Terminate the worker and release the cross-tab lock. The vault is unusable afterwards. */

@@ -78,6 +78,46 @@ export function session_open_recovery(code: string, blob: Uint8Array, epoch: Uin
  */
 export function session_sql(db: string, sql: string, params_json: string): string;
 
+/**
+ * Apply a pulled image into the live session (FastForward / fork-winner only). See inner docs.
+ */
+export function session_sync_apply(image: Uint8Array): void;
+
+/**
+ * Opaque 16-byte relay bucket id for the live session's DEK + `db_uuid` (freehold-sync-design §4).
+ */
+export function session_sync_id(db_uuid: Uint8Array): Uint8Array;
+
+/**
+ * Authenticated-open a relay blob → `{ dbUuid, vv, image }` (all Uint8Array). Wrong key/tamper Errs.
+ */
+export function session_sync_open(sealed: Uint8Array): any;
+
+/**
+ * Seal the live session's current image + `vv` into a relay blob under the DEK-derived sync_key.
+ */
+export function session_sync_seal(db_uuid: Uint8Array, vv: Uint8Array): Uint8Array;
+
+/**
+ * Classify incoming vs local → `{ outcome: 'fastforward'|'stale'|'fork', winnerIsIncoming: bool }`.
+ */
+export function sync_reconcile(local_vv: Uint8Array, incoming_vv: Uint8Array): any;
+
+/**
+ * The empty version vector (all-zero components), encoded.
+ */
+export function sync_vv_empty(): Uint8Array;
+
+/**
+ * Bump `device_id`'s component in `vv` by one; returns the re-encoded vector.
+ */
+export function sync_vv_increment(vv: Uint8Array, device_id: Uint8Array): Uint8Array;
+
+/**
+ * Element-wise max of two vectors (applied after a fork resolves so it does not re-trigger).
+ */
+export function sync_vv_merge(a: Uint8Array, b: Uint8Array): Uint8Array;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
@@ -96,6 +136,14 @@ export interface InitOutput {
     readonly session_open: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
     readonly session_open_recovery: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
     readonly session_sql: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly session_sync_apply: (a: number, b: number) => [number, number];
+    readonly session_sync_id: (a: number, b: number) => [number, number, number, number];
+    readonly session_sync_open: (a: number, b: number) => [number, number, number];
+    readonly session_sync_seal: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly sync_reconcile: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly sync_vv_empty: () => [number, number];
+    readonly sync_vv_increment: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly sync_vv_merge: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly rust_sqlite_wasm_abort: () => void;
     readonly rust_sqlite_wasm_assert_fail: (a: number, b: number, c: number, d: number) => void;
     readonly rust_sqlite_wasm_calloc: (a: number, b: number) => number;

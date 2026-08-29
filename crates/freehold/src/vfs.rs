@@ -1393,6 +1393,17 @@ impl OpfsSAHPool {
             .map_err(|e| OpfsSAHError::Generic(format!("epoch seal: {e:?}")))
     }
 
+    // ============ ENC (freehold-sync-design §4/§5): sync-layer key material ============
+    // Both derive purely from the DEK (no manifest / generation), exactly like `epoch_key` above: the
+    // DEK stays inside the pool. Only the opaque 16-byte `sync_id` (a capability, not the key) and
+    // blobs sealed under `sync_crypto` ever cross out — the relay/JS never see the DEK itself.
+    fn sync_id(&self, db_uuid: &[u8; 16]) -> [u8; 16] {
+        crypto::sync_id(&self.dek, db_uuid)
+    }
+    fn sync_crypto(&self) -> Crypto {
+        Crypto::sync_key(&self.dek)
+    }
+
     // Apply a peer's epoch token: verify under K_epoch, then RAISE this device's local anchor
     // high-water mark (`committed`) for that db_uuid — max only, never lower. The existing open-path
     // rollback check (`manifest_gen + 1 < committed`) then refuses any local state older than what a
@@ -2003,6 +2014,19 @@ impl OpfsSAHPoolUtil {
     /// mark so a subsequent rollback below it is refused at open. Requires the REAL DEK.
     pub fn apply_epoch(&self, token: &[u8]) -> Result<u64> {
         self.pool.apply_epoch(token)
+    }
+
+    /// ENC (freehold-sync-design §4): the opaque per-DB relay bucket id for this pool's DEK. 16 bytes;
+    /// a capability the device holds, safe to hand to the relay — it is NOT the key.
+    pub fn sync_id(&self, db_uuid: &[u8; 16]) -> [u8; 16] {
+        self.pool.sync_id(db_uuid)
+    }
+
+    /// ENC (freehold-sync-design §5): the DEK-derived subkey that seals/opens sync blobs. Returned as
+    /// a `Crypto` (a purpose-limited subkey, not the DEK) so the sync layer can seal/open in wasm
+    /// without the DEK ever leaving the pool.
+    pub fn sync_crypto(&self) -> Crypto {
+        self.pool.sync_crypto()
     }
 
     pub fn delete_db(&self, filename: &str) -> Result<bool> {

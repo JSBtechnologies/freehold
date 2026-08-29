@@ -26,6 +26,39 @@ export interface BundleMeta {
 /** Row values from sql(): everything is stringified by the wasm core; SQL NULL becomes null. */
 export type SqlValue = string | null;
 
+/** The blind-relay transport contract (freehold-sync-design §10). Any transport — in-memory, HTTP,
+ *  P2P — implements exactly these three methods over an opaque `syncId` bucket of sealed blobs. The
+ *  relay never sees keys or plaintext. Auth (when a transport needs it) lives inside the concrete
+ *  implementation, not this interface (see the freehold-relay-auth design). */
+export interface BlindRelay {
+  /** Append a sealed blob; resolves to its arrival index (seq). */
+  put(syncId: Uint8Array, sealed: Uint8Array): Promise<number>;
+  /** Count of blobs at seq ≥ `since` (how many are new for a client with that cursor). */
+  list(syncId: Uint8Array, since: number): Promise<number>;
+  /** Fetch one sealed blob by arrival index, or null if out of range. */
+  get(syncId: Uint8Array, seq: number): Promise<Uint8Array | null>;
+}
+
+/** Outcome of a sync() pass. */
+export interface SyncReport {
+  /** Did we publish our current state this pass? */
+  pushed: boolean;
+  /** How many blobs we pulled from the relay. */
+  pulled: number;
+  /** How many pulled blobs fast-forwarded our state. */
+  applied: number;
+  /** How many concurrent forks were detected+resolved this pass (losers preserved). */
+  forks: number;
+}
+
+/** The decrypted contents of a preserved fork sibling (openFork). */
+export interface ForkImage {
+  dbUuid: Uint8Array;
+  vv: Uint8Array;
+  /** The `.freehold` bundle bytes of the losing sibling. */
+  image: Uint8Array;
+}
+
 /** Bindable parameter values for sql() `?` placeholders (blobs deferred). */
 export type SqlParam = string | number | boolean | null;
 
@@ -96,7 +129,21 @@ export declare class FreeholdVault {
   /** Import a `.freehold` bundle and persist its envelope/credId/epoch (locks any open session first). */
   importBundle(bytes: Uint8Array | ArrayBuffer): Promise<BundleMeta>;
 
-  /** Forget the stored envelope/credId/epoch (passkeys and OPFS ciphertext are untouched). */
+  /** Server-blind, epoch-ordered replication over a BlindRelay: pull + reconcile (fast-forward /
+   *  stale / fork) + apply winners + preserve fork losers + push. Requires an open session. */
+  sync(options: { relay: BlindRelay; push?: boolean }): Promise<SyncReport>;
+
+  /** Register a fork listener (concurrent offline edits detected). Returns an unsubscribe fn. */
+  onFork(cb: (fork: { id: string; winner: 'local' | 'incoming' }) => void): () => void;
+
+  /** List preserved fork siblings (LWW losers — never silently dropped). */
+  listForks(): Promise<{ id: string }[]>;
+
+  /** Recover a preserved fork's decrypted contents by id. Requires an open session. */
+  openFork(id: string): Promise<ForkImage>;
+
+  /** Forget the stored envelope/credId/epoch and sync lineage (passkeys and OPFS ciphertext are
+   *  untouched; the stable deviceId is kept). */
   reset(): Promise<void>;
 
   /** Terminate the worker and release the cross-tab lock; the vault is unusable afterwards. */

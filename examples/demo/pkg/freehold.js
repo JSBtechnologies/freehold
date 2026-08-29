@@ -258,6 +258,140 @@ export function session_sql(db, sql, params_json) {
         wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
     }
 }
+
+/**
+ * Apply a pulled image into the live session (FastForward / fork-winner only). See inner docs.
+ * @param {Uint8Array} image
+ */
+export function session_sync_apply(image) {
+    const ptr0 = passArray8ToWasm0(image, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.session_sync_apply(ptr0, len0);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * Opaque 16-byte relay bucket id for the live session's DEK + `db_uuid` (freehold-sync-design §4).
+ * @param {Uint8Array} db_uuid
+ * @returns {Uint8Array}
+ */
+export function session_sync_id(db_uuid) {
+    const ptr0 = passArray8ToWasm0(db_uuid, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.session_sync_id(ptr0, len0);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
+ * Authenticated-open a relay blob → `{ dbUuid, vv, image }` (all Uint8Array). Wrong key/tamper Errs.
+ * @param {Uint8Array} sealed
+ * @returns {any}
+ */
+export function session_sync_open(sealed) {
+    const ptr0 = passArray8ToWasm0(sealed, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.session_sync_open(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Seal the live session's current image + `vv` into a relay blob under the DEK-derived sync_key.
+ * @param {Uint8Array} db_uuid
+ * @param {Uint8Array} vv
+ * @returns {Uint8Array}
+ */
+export function session_sync_seal(db_uuid, vv) {
+    const ptr0 = passArray8ToWasm0(db_uuid, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(vv, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.session_sync_seal(ptr0, len0, ptr1, len1);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v3;
+}
+
+/**
+ * Classify incoming vs local → `{ outcome: 'fastforward'|'stale'|'fork', winnerIsIncoming: bool }`.
+ * @param {Uint8Array} local_vv
+ * @param {Uint8Array} incoming_vv
+ * @returns {any}
+ */
+export function sync_reconcile(local_vv, incoming_vv) {
+    const ptr0 = passArray8ToWasm0(local_vv, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(incoming_vv, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.sync_reconcile(ptr0, len0, ptr1, len1);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * The empty version vector (all-zero components), encoded.
+ * @returns {Uint8Array}
+ */
+export function sync_vv_empty() {
+    const ret = wasm.sync_vv_empty();
+    var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v1;
+}
+
+/**
+ * Bump `device_id`'s component in `vv` by one; returns the re-encoded vector.
+ * @param {Uint8Array} vv
+ * @param {Uint8Array} device_id
+ * @returns {Uint8Array}
+ */
+export function sync_vv_increment(vv, device_id) {
+    const ptr0 = passArray8ToWasm0(vv, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(device_id, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.sync_vv_increment(ptr0, len0, ptr1, len1);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v3;
+}
+
+/**
+ * Element-wise max of two vectors (applied after a fork resolves so it does not re-trigger).
+ * @param {Uint8Array} a
+ * @param {Uint8Array} b
+ * @returns {Uint8Array}
+ */
+export function sync_vv_merge(a, b) {
+    const ptr0 = passArray8ToWasm0(a, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(b, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.sync_vv_merge(ptr0, len0, ptr1, len1);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v3;
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -677,7 +811,7 @@ function __wbg_get_imports() {
             return ret;
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 684, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 685, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__ha22148a4a7c1d5ff);
             return ret;
         },

@@ -1124,6 +1124,10 @@ async fn run() -> std::result::Result<String, String> {
     r.push_str(&sync_test().await?);
     r.push('\n');
 
+    // ---- Section SJ: the SDK-facing session sync ops (wasm boundary the @freehold/db worker uses) -
+    r.push_str(&sync_session_test().await?);
+    r.push('\n');
+
     // ---- Section S: the session model (mock PRF — no gesture) ----------------------------------
     r.push_str(&session_test().await?);
 
@@ -1654,4 +1658,265 @@ fn session_export_inner(cred_id: &[u8]) -> std::result::Result<Vec<u8>, String> 
 pub fn session_export(cred_id: &[u8]) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
     session_export_inner(cred_id).map_err(|e| JsValue::from_str(&e))
+}
+
+// ============================ session sync surface (freehold-sync-design §10 item 3) ============================
+// Thin wasm ops that let the @freehold/db SDK drive the PROVEN sync engine (sync.rs) from JS. The
+// security- and correctness-critical parts stay in wasm: sealing/opening blobs under the DEK-derived
+// sync_key (the DEK never leaves the pool — sync_crypto is a subkey), and ALL conflict classification
+// (reconcile + version-vector algebra). JS owns only orchestration: the push/pull loop, the pluggable
+// blind-relay transport, IDB persistence of device_id / version-vector / pull-cursor, and the fork
+// API surface. The version vector is non-secret lineage metadata and the image is already ciphertext,
+// so both cross the boundary as opaque bytes.
+
+fn slice16(b: &[u8], what: &str) -> std::result::Result<[u8; 16], String> {
+    if b.len() != 16 {
+        return Err(format!("{what} must be 16 bytes, got {}", b.len()));
+    }
+    let mut a = [0u8; 16];
+    a.copy_from_slice(b);
+    Ok(a)
+}
+
+fn decode_vv(bytes: &[u8], what: &str) -> std::result::Result<sync::VersionVector, String> {
+    let mut at = 0usize;
+    let v = sync::VersionVector::decode(bytes, &mut at)?;
+    if at != bytes.len() {
+        return Err(format!("{what}: trailing bytes"));
+    }
+    Ok(v)
+}
+
+// Collect every DB in the live session's pool into an image-only `.freehold` bundle (no envelope /
+// credId / epoch — the sync image is pure ciphertext; freshness rides the version vector). Mirrors
+// `session_export_inner` minus the key/envelope sections.
+fn session_image() -> std::result::Result<Vec<u8>, String> {
+    SESSION.with(|cell| {
+        let guard = cell.borrow();
+        let s = guard
+            .as_ref()
+            .ok_or_else(|| "no active session — call session_open first".to_string())?;
+        let mut names: Vec<String> =
+            s.util.list().into_iter().filter(|n| n.ends_with(".db")).collect();
+        names.sort();
+        let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+        for name in &names {
+            let text = s.util.export_bundle(name).map_err(|e| format!("export {name}: {e:?}"))?;
+            for line in text.lines() {
+                let Some((n, hex)) = line.split_once('|') else { continue };
+                files.push((n.to_string(), hex_to_bytes(hex)?));
+            }
+        }
+        if files.is_empty() {
+            return Err("nothing to sync — create a database first".into());
+        }
+        Ok(bundle::encode(&[], &[], &files, &[]))
+    })
+}
+
+fn session_sync_id_inner(db_uuid: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    let u = slice16(db_uuid, "db_uuid")?;
+    SESSION.with(|cell| {
+        let g = cell.borrow();
+        let s = g
+            .as_ref()
+            .ok_or_else(|| "no active session — call session_open first".to_string())?;
+        Ok(s.util.sync_id(&u).to_vec())
+    })
+}
+
+fn session_sync_seal_inner(db_uuid: &[u8], vv: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    let db_uuid = slice16(db_uuid, "db_uuid")?;
+    let vv = decode_vv(vv, "version vector")?;
+    let image = session_image()?;
+    let sync_crypto = SESSION.with(|cell| {
+        let g = cell.borrow();
+        let s = g
+            .as_ref()
+            .ok_or_else(|| "no active session — call session_open first".to_string())?;
+        Ok::<_, String>(s.util.sync_crypto())
+    })?;
+    let blob = sync::SyncBlob { db_uuid, vv, image };
+    blob.seal(&sync_crypto).map_err(|e| format!("seal sync blob: {e:?}"))
+}
+
+fn session_sync_open_parts(sealed: &[u8]) -> std::result::Result<([u8; 16], Vec<u8>, Vec<u8>), String> {
+    let sync_crypto = SESSION.with(|cell| {
+        let g = cell.borrow();
+        let s = g
+            .as_ref()
+            .ok_or_else(|| "no active session — call session_open first".to_string())?;
+        Ok::<_, String>(s.util.sync_crypto())
+    })?;
+    let blob = sync::SyncBlob::open(sealed, &sync_crypto)?;
+    Ok((blob.db_uuid, blob.vv.encode(), blob.image))
+}
+
+// Apply a pulled image into the LIVE session pool: close open handles so the ciphertext files can be
+// overwritten, import the image, and drop the handle map so the next `session_sql` reopens fresh
+// against it. The DEK/pool persist — no re-unlock. Callers only reach here for FastForward or the
+// fork WINNER (generation ≥ current), so the anti-rollback anchor admits it at reopen; a stale image
+// is classified Stale by `reconcile` and never applied.
+fn session_sync_apply_inner(image: &[u8]) -> std::result::Result<(), String> {
+    let b = bundle::decode(image).map_err(|e| format!("bundle decode: {e}"))?;
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let s = guard
+            .as_mut()
+            .ok_or_else(|| "no active session — call session_open first".to_string())?;
+        for (_, db) in s.handles.drain() {
+            unsafe {
+                ffi::sqlite3_close(db);
+            }
+        }
+        s.util.import_files(&b.files).map_err(|e| format!("import_files: {e:?}"))
+    })
+}
+
+fn sync_reconcile_inner(local_vv: &[u8], incoming_vv: &[u8]) -> std::result::Result<(&'static str, bool), String> {
+    let l = decode_vv(local_vv, "local vv")?;
+    let i = decode_vv(incoming_vv, "incoming vv")?;
+    Ok(match sync::reconcile(&l, &i) {
+        sync::MergeOutcome::FastForward => ("fastforward", false),
+        sync::MergeOutcome::Stale => ("stale", false),
+        sync::MergeOutcome::Fork { winner_is_incoming } => ("fork", winner_is_incoming),
+    })
+}
+
+/// Opaque 16-byte relay bucket id for the live session's DEK + `db_uuid` (freehold-sync-design §4).
+#[wasm_bindgen]
+pub fn session_sync_id(db_uuid: &[u8]) -> Result<Vec<u8>, JsValue> {
+    console_error_panic_hook::set_once();
+    session_sync_id_inner(db_uuid).map_err(|e| JsValue::from_str(&e))
+}
+
+/// Seal the live session's current image + `vv` into a relay blob under the DEK-derived sync_key.
+#[wasm_bindgen]
+pub fn session_sync_seal(db_uuid: &[u8], vv: &[u8]) -> Result<Vec<u8>, JsValue> {
+    console_error_panic_hook::set_once();
+    session_sync_seal_inner(db_uuid, vv).map_err(|e| JsValue::from_str(&e))
+}
+
+/// Authenticated-open a relay blob → `{ dbUuid, vv, image }` (all Uint8Array). Wrong key/tamper Errs.
+#[wasm_bindgen]
+pub fn session_sync_open(sealed: &[u8]) -> Result<JsValue, JsValue> {
+    console_error_panic_hook::set_once();
+    let (db_uuid, vv, image) = session_sync_open_parts(sealed).map_err(|e| JsValue::from_str(&e))?;
+    let out = js_sys::Object::new();
+    for (k, v) in [("dbUuid", db_uuid.as_slice()), ("vv", vv.as_slice()), ("image", image.as_slice())] {
+        js_sys::Reflect::set(&out, &JsValue::from_str(k), &js_sys::Uint8Array::from(v))?;
+    }
+    Ok(out.into())
+}
+
+/// Apply a pulled image into the live session (FastForward / fork-winner only). See inner docs.
+#[wasm_bindgen]
+pub fn session_sync_apply(image: &[u8]) -> Result<(), JsValue> {
+    console_error_panic_hook::set_once();
+    session_sync_apply_inner(image).map_err(|e| JsValue::from_str(&e))
+}
+
+/// The empty version vector (all-zero components), encoded.
+#[wasm_bindgen]
+pub fn sync_vv_empty() -> Vec<u8> {
+    sync::VersionVector::new().encode()
+}
+
+/// Bump `device_id`'s component in `vv` by one; returns the re-encoded vector.
+#[wasm_bindgen]
+pub fn sync_vv_increment(vv: &[u8], device_id: &[u8]) -> Result<Vec<u8>, JsValue> {
+    (|| -> std::result::Result<Vec<u8>, String> {
+        let dev = slice16(device_id, "device_id")?;
+        let mut v = decode_vv(vv, "version vector")?;
+        v.increment(&dev);
+        Ok(v.encode())
+    })()
+    .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Element-wise max of two vectors (applied after a fork resolves so it does not re-trigger).
+#[wasm_bindgen]
+pub fn sync_vv_merge(a: &[u8], b: &[u8]) -> Result<Vec<u8>, JsValue> {
+    (|| -> std::result::Result<Vec<u8>, String> {
+        let mut va = decode_vv(a, "vv a")?;
+        let vb = decode_vv(b, "vv b")?;
+        va.merge_max(&vb);
+        Ok(va.encode())
+    })()
+    .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Classify incoming vs local → `{ outcome: 'fastforward'|'stale'|'fork', winnerIsIncoming: bool }`.
+#[wasm_bindgen]
+pub fn sync_reconcile(local_vv: &[u8], incoming_vv: &[u8]) -> Result<JsValue, JsValue> {
+    let (outcome, winner) = sync_reconcile_inner(local_vv, incoming_vv).map_err(|e| JsValue::from_str(&e))?;
+    let out = js_sys::Object::new();
+    js_sys::Reflect::set(&out, &JsValue::from_str("outcome"), &JsValue::from_str(outcome))?;
+    js_sys::Reflect::set(&out, &JsValue::from_str("winnerIsIncoming"), &JsValue::from_bool(winner))?;
+    Ok(out.into())
+}
+
+/// Section SJ — the SDK-facing session sync ops (freehold-sync-design §10 item 3), driven through a
+/// LIVE session exactly as the @freehold/db worker drives them. Proves the wasm boundary: sync_id
+/// derivation, seal→open round-trip, version-vector helpers + reconcile agreeing with the engine, and
+/// apply reopening cleanly. The multi-device ORDERING/FORK semantics themselves are proven in SY over
+/// fresh pools; this proves the thin session wrappers on top of them.
+async fn sync_session_test() -> std::result::Result<String, String> {
+    let prf: [u8; 32] = [37u8; 32]; // stand-in for a WebAuthn-PRF assertion
+    let blob = envelope::create_envelope(&DEK_OK, &prf).map_err(|e| format!("SJ create_envelope: {e:?}"))?;
+    session_open(&prf, &blob, &[])
+        .await
+        .map_err(|e| format!("SJ session_open: {e:?}"))?;
+
+    session_sql_inner("app", "CREATE TABLE t(v TEXT)", "[]")?;
+    session_sql_inner("app", "INSERT INTO t(v) VALUES ('base')", "[]")?;
+
+    let db_uuid: [u8; 16] = *b"freehold-sj-uuid";
+
+    // 1) sync_id: 16 bytes, deterministic, and db_uuid-sensitive.
+    let id1 = session_sync_id_inner(&db_uuid)?;
+    if id1.len() != 16 || id1 != session_sync_id_inner(&db_uuid)? {
+        return Err("SJ: sync_id not 16 bytes / not deterministic".into());
+    }
+    let mut other = db_uuid;
+    other[0] ^= 0xff;
+    if session_sync_id_inner(&other)? == id1 {
+        return Err("SJ: sync_id not sensitive to db_uuid".into());
+    }
+
+    // 2) vv helpers + seal→open round-trip preserves db_uuid, vv, and the exact image bytes.
+    let dev = [0x5au8; 16];
+    let vv1 = sync_vv_increment(&sync_vv_empty(), &dev).map_err(|e| format!("SJ vv_increment: {e:?}"))?;
+    let sealed = session_sync_seal_inner(&db_uuid, &vv1)?;
+    let (o_uuid, o_vv, o_image) = session_sync_open_parts(&sealed)?;
+    if o_uuid != db_uuid {
+        return Err("SJ: opened db_uuid mismatch".into());
+    }
+    if o_vv != vv1 {
+        return Err("SJ: opened vv mismatch".into());
+    }
+    if o_image != session_image()? {
+        return Err("SJ: opened image != current session image".into());
+    }
+
+    // 3) reconcile agrees with the engine: {dev:2} vs {dev:1} → fast-forward; reverse → stale.
+    let vv2 = sync_vv_increment(&vv1, &dev).map_err(|e| format!("SJ vv_increment2: {e:?}"))?;
+    if sync_reconcile_inner(&vv1, &vv2)?.0 != "fastforward" {
+        return Err("SJ: reconcile(local={dev:1}, incoming={dev:2}) should fast-forward".into());
+    }
+    if sync_reconcile_inner(&vv2, &vv1)?.0 != "stale" {
+        return Err("SJ: reconcile(local={dev:2}, incoming={dev:1}) should be stale".into());
+    }
+
+    // 4) apply reopens cleanly: applying the current image (equal generation — anti-rollback admits
+    //    it) closes+reopens handles without corruption; the DB still reads back. Forward-apply that
+    //    REPLACES state across devices is the SY proof; here we prove the wrapper's handle refresh.
+    session_sync_apply_inner(&o_image)?;
+    let rows = session_sql_inner("app", "SELECT v FROM t", "[]")?;
+    if rows != "[[\"base\"]]" {
+        return Err(format!("SJ: after apply expected [[\"base\"]], got {rows}"));
+    }
+
+    session_lock_inner()?;
+    Ok("SJ. session sync ops (SDK boundary): sync_id derived+opaque | seal\u{2192}open round-trips image+vv | reconcile matches engine | apply refreshes handles \u{2705}".to_string())
 }
