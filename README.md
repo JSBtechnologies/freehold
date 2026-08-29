@@ -91,7 +91,7 @@ cd examples/demo && npm install && npm run dev
 | `crates/freehold/src/manifest.rs` | anti-rollback manifest + freshness-anchor formats |
 | `crates/freehold/src/vfs.rs` | forked SAHPool VFS with the encrypted block device spliced in |
 | `crates/freehold/src/envelope.rs` | passkey-PRF / recovery-code N-KEK envelope |
-| `crates/freehold/src/lib.rs` | wasm entry points: `run_tests`, enroll/unlock, export/import |
+| `crates/freehold/src/lib.rs` | wasm entry points: `run_tests`, enroll, session (open/sql/export/lock), import |
 | `examples/demo/` | self-test harness + passkey demo (Vite) |
 | `docs/design-spec.md` | the VFS design spec (v1.1) |
 | `docs/sync-epoch-design.md` | peer-attested anti-rollback design |
@@ -108,6 +108,8 @@ audited — don't bet lives on it.
 
 ## Roadmap
 
+- ~~Session model (one passkey ceremony, many queries), parameterized SQL, named DBs, cross-tab
+  Web Lock guard, `navigator.storage.persist()`~~ — **done**.
 - Publish `@freehold/db` to npm (the SDK lives in `packages/db`). (The bare `freehold` npm name is
   squatted by a dead 2022 package; the scope is ours.)
 - BIP39 checksummed recovery phrases (currently Crockford-Base32).

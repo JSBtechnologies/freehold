@@ -43,8 +43,9 @@
     <button id="addRecovery" disabled>Add recovery code</button>
     <button id="addPasskey" disabled>Add another passkey</button>
 
-    <h2>3 · Unlock</h2>
+    <h2>3 · Unlock / lock the session</h2>
     <button id="unlock" disabled>Unlock with passkey</button>
+    <button id="lock" disabled>Lock</button>
     <div style="margin-top:8px">
       <input id="recoveryInput" placeholder="paste recovery code…" />
       <button id="unlockRecovery" disabled>Unlock with recovery code</button>
@@ -80,10 +81,17 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
     const log = (msg, cls) => { out.className = cls || ''; out.textContent = msg; };
 
     if (!FreeholdVault.isSupported()) log('This browser lacks WebAuthn or OPFS — the demo cannot run.', 'err');
-    const vault = await FreeholdVault.open({
-      wasmUrl: new URL('./pkg/freehold.js', import.meta.url),
-      rpName: 'freehold demo',
-    });
+    let vault;
+    try {
+      vault = await FreeholdVault.open({
+        wasmUrl: new URL('./pkg/freehold.js', import.meta.url),
+        rpName: 'freehold demo',
+      });
+    } catch (e) {
+      // Most likely the tab guard ("already open in another tab") — surface it instead of a dead UI.
+      log(e.message, 'err');
+      throw e;
+    }
 
     async function refreshMethods() {
       const ul = $('methods');
@@ -109,21 +117,24 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
       $('unlock').disabled = !has; $('addRecovery').disabled = !has;
       $('addPasskey').disabled = !has; $('unlockRecovery').disabled = !has;
       $('exportBundle').disabled = !has; $('addNote').disabled = !has;
+      $('lock').disabled = !has;
     }
 
     $('addNote').onclick = async () => {
       try {
-        log('Approve your passkey to add a note (advances the DB version)…');
-        // Generic SQL through the SDK — the demo schema is just SQL now, not a wasm export.
-        const rows = await vault.sql(
-          "INSERT INTO secret(v) VALUES ('note @ ' || datetime('now')); SELECT count(*) FROM secret");
-        log(`Added a note (DB now has ${rows[0][0]} rows — a newer version). Export a fresh bundle.`, 'ok');
-      } catch (e) { log('Add data failed: ' + (e.message || e), 'err'); }
+        // The whole point of sessions: this rides the open session — parameterized INSERT, no
+        // passkey prompt, no gesture.
+        await vault.sql("INSERT INTO notes(body, at) VALUES (?, datetime('now'))",
+          ['note added via the open session']);
+        const [[n]] = await vault.sql('SELECT count(*) FROM notes');
+        log(`Added a note with NO passkey prompt — the open session held the key. ` +
+            `DB now has ${n} rows (a newer version); export a fresh bundle.`, 'ok');
+      } catch (e) { log('Add data failed (unlock first?): ' + (e.message || e), 'err'); }
     };
 
     $('exportBundle').onclick = async () => {
       try {
-        log('Approve your passkey to authorize the export (also mints a freshness epoch)…');
+        log('Exporting from the open session (its key mints the freshness epoch — no prompt)…');
         const bytes = await vault.exportBundle();
         const url = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
         const a = document.createElement('a');
@@ -148,10 +159,16 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
 
     $('enroll').onclick = async () => {
       try {
-        log('Registering a passkey, deriving its PRF, wrapping a fresh DEK, creating the DB…');
+        log('Registering a passkey, wrapping a fresh DEK, opening a session, creating the schema…');
         await vault.enroll();
+        await vault.unlock(); // one ceremony opens the session; everything below rides it
+        // The demo schema is plain SQL through the SDK now — the wasm core is schema-agnostic.
+        await vault.sql('CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY, body TEXT, at TEXT)');
+        await vault.sql("INSERT INTO notes(body, at) VALUES (?, datetime('now'))",
+          ['unlocked-by-your-passkey \u{1F510}']);
         await syncButtons(); await refreshMethods();
-        log('Enrolled. Add a recovery code so you can get in even without this device.', 'ok');
+        log('Enrolled + unlocked: schema created, first note seeded — the session stays open ' +
+            '(no more prompts until Lock). Add a recovery code so you can get in without this device.', 'ok');
       } catch (e) { log('Enroll failed: ' + (e.message || e), 'err'); }
     };
 
@@ -176,22 +193,36 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
       } catch (e) { log('Add passkey failed: ' + (e.message || e), 'err'); }
     };
 
+    // Render the notes table via a parameterized SELECT on the open session.
+    async function renderNotes() {
+      const rows = await vault.sql('SELECT id, body, at FROM notes WHERE id >= ? ORDER BY id', [1]);
+      return rows.map(([id, body, at]) => `    #${id}  ${body}  (${at})`).join('\n');
+    }
+
     $('unlock').onclick = async () => {
       try {
-        log('Asserting your passkey to re-derive the PRF…');
-        const secret = await vault.unlock();
-        log('UNLOCKED (passkey). Decrypted row:\n\n    ' + secret +
-            '\n\nThe DEK was never stored — reconstructed from your passkey.', 'ok');
+        log('Asserting your passkey to re-derive the PRF (one ceremony opens the session)…');
+        await vault.unlock();
+        log('UNLOCKED (passkey) — session open. Decrypted rows:\n\n' + await renderNotes() +
+            '\n\nThe DEK was never stored — reconstructed from your passkey. Further queries need no prompt.', 'ok');
       } catch (e) { log('Unlock failed: ' + (e.message || e), 'err'); }
+    };
+
+    $('lock').onclick = async () => {
+      try {
+        await vault.lock();
+        log('Locked. The worker closed every DB handle, released the OPFS pool and dropped the ' +
+            'session key state — unlock again to continue.', 'muted');
+      } catch (e) { log('Lock failed: ' + (e.message || e), 'err'); }
     };
 
     $('unlockRecovery').onclick = async () => {
       try {
         const code = $('recoveryInput').value.trim();
         if (!code) throw new Error('paste a recovery code first');
-        log('Deriving the recovery KEK (Argon2id) and opening the DB…');
-        const secret = await vault.unlockWithRecovery(code);
-        log('UNLOCKED (recovery code). Decrypted row:\n\n    ' + secret +
+        log('Deriving the recovery KEK (Argon2id) and opening a session…');
+        await vault.unlockWithRecovery(code);
+        log('UNLOCKED (recovery code) — session open. Decrypted rows:\n\n' + await renderNotes() +
             '\n\nSame DEK, opened by the recovery method — no passkey needed.', 'ok');
       } catch (e) { log('Recovery unlock failed: ' + (e.message || e), 'err'); }
     };

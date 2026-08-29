@@ -1,20 +1,20 @@
 /* tslint:disable */
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
-export const add_note: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
 export const add_passkey: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const add_recovery: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const enroll: (a: number, b: number) => any;
-export const export_db: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
 export const gen_recovery: () => [number, number, number, number];
 export const import_bundle: (a: number, b: number) => any;
 export const list_methods: (a: number, b: number) => [number, number, number, number];
 export const remove_method: (a: number, b: number, c: number) => [number, number, number, number];
-export const run_sql: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => any;
-export const run_sql_recovery: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => any;
 export const run_tests: () => any;
-export const unlock: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
-export const unlock_recovery: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
+export const session_active: () => number;
+export const session_export: (a: number, b: number) => [number, number, number, number];
+export const session_lock: () => [number, number];
+export const session_open: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
+export const session_open_recovery: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
+export const session_sql: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const rust_sqlite_wasm_abort: () => void;
 export const rust_sqlite_wasm_assert_fail: (a: number, b: number, c: number, d: number) => void;
 export const rust_sqlite_wasm_calloc: (a: number, b: number) => number;

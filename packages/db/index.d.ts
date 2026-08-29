@@ -7,6 +7,8 @@ export interface OpenOptions {
   workerUrl?: string | URL;
   /** WebAuthn relying-party display name shown in the passkey prompt. */
   rpName?: string;
+  /** Auto-lock after this many ms of inactivity (rolling — reset on every op). 0/undefined = off. */
+  lockAfterMs?: number;
 }
 
 export interface UnlockMethod {
@@ -24,6 +26,9 @@ export interface BundleMeta {
 /** Row values from sql(): everything is stringified by the wasm core; SQL NULL becomes null. */
 export type SqlValue = string | null;
 
+/** Bindable parameter values for sql() `?` placeholders (blobs deferred). */
+export type SqlParam = string | number | boolean | null;
+
 /** Register a new resident passkey with the PRF extension; resolves to the raw credential id. */
 export declare function registerPasskey(rpName?: string): Promise<Uint8Array>;
 
@@ -33,23 +38,35 @@ export declare function assertPrf(credId?: Uint8Array | null): Promise<{ prf: Ui
 export declare class FreeholdVault {
   private constructor();
 
+  /** Did the browser grant persistent storage (navigator.storage.persist())? Best-effort. */
+  persisted: Promise<boolean>;
+
   /** WebAuthn + OPFS present? (PRF support itself can only be probed with a real authenticator.) */
   static isSupported(): boolean;
 
-  /** Spawn the vault worker and load the wasm core. */
+  /** Spawn the vault worker and load the wasm core. Throws if the vault is already open in
+   *  another tab (Web Lock guard, feature-detected). */
   static open(options: OpenOptions): Promise<FreeholdVault>;
 
-  /** Register a passkey, wrap a fresh DEK, create the DB; persists envelope + credId in IndexedDB. */
+  /** Register a passkey, wrap a fresh DEK, initialize an empty vault; persists envelope + credId
+   *  in IndexedDB. Create your schema via sql() after unlock(). */
   enroll(): Promise<{ credId: Uint8Array }>;
 
   /** Whether an envelope is stored on this device (via enroll() or importBundle()). */
   isEnrolled(): Promise<boolean>;
 
-  /** Assert the passkey, unwrap the DEK, open the DB; resolves to the demo secret row. */
-  unlock(): Promise<string>;
+  /** Assert the passkey ONCE and open a session — sql()/exportBundle() then need no prompts
+   *  until lock(). */
+  unlock(): Promise<void>;
 
-  /** Unlock with a written recovery code instead of a passkey. */
-  unlockWithRecovery(code: string): Promise<string>;
+  /** Open a session with a written recovery code instead of a passkey. */
+  unlockWithRecovery(code: string): Promise<void>;
+
+  /** Close every DB handle, release the OPFS pool and drop the session key state. Idempotent. */
+  lock(): Promise<void>;
+
+  /** Is a session currently open? */
+  isUnlocked(): Promise<boolean>;
 
   /** Mint a fresh recovery code (without adding it as a method). */
   generateRecoveryCode(): Promise<string>;
@@ -66,21 +83,22 @@ export declare class FreeholdVault {
   /** List unlock methods on the envelope. */
   listMethods(): Promise<UnlockMethod[]>;
 
-  /** Run SQL (multi-statement allowed) after a passkey unlock; rows as arrays of stringified values. */
-  sql(query: string): Promise<SqlValue[][]>;
+  /** Run SQL in the open session against named database `db` (default 'app'; [a-z0-9_-]{1,32} —
+   *  each name is its own SQLite file). `params` bind `?` placeholders and require a single
+   *  statement; with no params, multi-statement scripts are allowed. Rows as arrays of
+   *  stringified values. */
+  sql(query: string, params?: SqlParam[], db?: string): Promise<SqlValue[][]>;
 
-  /** Run SQL after a recovery-code unlock (same semantics as sql()). */
-  sqlWithRecovery(code: string, query: string): Promise<SqlValue[][]>;
-
-  /** Export the binary `.freehold` bundle (envelope + credId + encrypted DB image + epoch; no key inside). */
+  /** Export the binary `.freehold` bundle from the open session (envelope + credId + every DB's
+   *  encrypted image + epoch; no key inside). Throws if locked. */
   exportBundle(): Promise<Uint8Array>;
 
-  /** Import a `.freehold` bundle and persist its envelope/credId/epoch. */
+  /** Import a `.freehold` bundle and persist its envelope/credId/epoch (locks any open session first). */
   importBundle(bytes: Uint8Array | ArrayBuffer): Promise<BundleMeta>;
 
   /** Forget the stored envelope/credId/epoch (passkeys and OPFS ciphertext are untouched). */
   reset(): Promise<void>;
 
-  /** Terminate the worker; the vault is unusable afterwards. */
+  /** Terminate the worker and release the cross-tab lock; the vault is unusable afterwards. */
   close(): void;
 }

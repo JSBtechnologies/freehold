@@ -16,6 +16,7 @@
 //!   9   size-math property test vs a shadow model (M3)
 //!   11  perf: batched/single-commit throughput + AEAD microbenchmark (M3; no null-cipher
 //!       plaintext baseline by design — §17.G)
+//!   S   session model: session_open → parameterized SQL on named DBs → lock → reopen (mock PRF)
 //! See BUILD-NOTES for the honest IN/DEFERRED ledger.
 
 mod bundle;
@@ -25,6 +26,8 @@ mod manifest;
 mod vfs;
 
 use sqlite_wasm_rs as ffi;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
@@ -283,6 +286,86 @@ async fn sync_epoch_test() -> std::result::Result<String, String> {
 the fresh state) applies the peer epoch then is fed the STALE image → open REJECTED; contrast device \
 with NO epoch opens the same stale image → the peer epoch is exactly what prevents the rollback \u{2705}"
     ))
+}
+
+/// Section S — the session model, driven exactly as the SDK drives it but with a MOCK PRF (no
+/// gesture): open → typed parameterized SQL on named DBs → isolation → strict-name and
+/// multi-statement-with-params rejection → lock kills ops → reopen sees the data. Runs on its own
+/// pool dir so it never touches a real enrollment in `enc-passkey`.
+async fn session_test() -> std::result::Result<String, String> {
+    let js = |e: JsValue| e.as_string().unwrap_or_else(|| format!("{e:?}"));
+    let prf: [u8; 32] = [21u8; 32]; // stand-in for the WebAuthn PRF assertion output
+    let blob = envelope::create_envelope(&DEK_OK, &prf).map_err(|e| format!("S. create_envelope: {e:?}"))?;
+    let dek = envelope::open_with_prf(&blob, &prf).map_err(|e| format!("S. open envelope: {e:?}"))?;
+
+    // ---- open (fresh dir), create schema, parameterized insert covering every bound type -------
+    session_begin(&dek, &blob, &[], &dir_cfg("pk-sess", "enc-session", true)).await?;
+    if !session_active() {
+        return Err("S. session_active=false right after session_open".into());
+    }
+    session_sql("app", "CREATE TABLE t(a,b,c,d,e)", "").map_err(&js)?;
+    session_sql(
+        "app",
+        "INSERT INTO t(a,b,c,d,e) VALUES (?,?,?,?,?)",
+        r#"[null, 42, 3.5, "s-\"quoted\"", true]"#,
+    )
+    .map_err(&js)?;
+    let rows = session_sql("app", "SELECT a,b,c,d,e FROM t", "").map_err(&js)?;
+    let want = r#"[[null,"42","3.5","s-\"quoted\"","1"]]"#; // null→NULL, bool→1, all values stringified
+    if rows != want {
+        return Err(format!("S. param round-trip mismatch: got {rows}, want {want}"));
+    }
+
+    // ---- second named DB, isolated from the first ----------------------------------------------
+    session_sql("notes", "CREATE TABLE t(a)", "").map_err(&js)?;
+    session_sql("notes", "INSERT INTO t(a) VALUES (?)", "[\"only-in-notes\"]").map_err(&js)?;
+    let leak = session_sql("app", "SELECT count(*) FROM t WHERE a='only-in-notes'", "").map_err(&js)?;
+    let n_app = session_sql("app", "SELECT count(*) FROM t", "").map_err(&js)?;
+    let n_notes = session_sql("notes", "SELECT count(*) FROM t", "").map_err(&js)?;
+    if leak != r#"[["0"]]"# || n_app != r#"[["1"]]"# || n_notes != r#"[["1"]]"# {
+        return Err(format!(
+            "S. named-DB isolation broken: leak={leak} app={n_app} notes={n_notes}"
+        ));
+    }
+
+    // ---- strict db-name validation (the name becomes an OPFS filename) -------------------------
+    let too_long = "a".repeat(33);
+    for bad in ["App", "a b", "", "../x", "a.db", too_long.as_str()] {
+        if session_sql(bad, "SELECT 1", "").is_ok() {
+            return Err(format!("S. bad db name {bad:?} was ACCEPTED"));
+        }
+    }
+
+    // ---- multi-statement WITH params must be rejected (params bind the FIRST statement only) ----
+    match session_sql("app", "SELECT ?; SELECT 2", "[1]") {
+        Ok(_) => return Err("S. multi-statement WITH params was ACCEPTED".into()),
+        Err(e) => {
+            let m = js(e);
+            if !m.contains("single statement") {
+                return Err(format!("S. multi+params rejected with the wrong error: {m}"));
+            }
+        }
+    }
+
+    // ---- lock: every op must fail; reopen: the data is intact -----------------------------------
+    session_lock().map_err(&js)?;
+    if session_active() {
+        return Err("S. session_active=true after session_lock".into());
+    }
+    if session_sql("app", "SELECT 1", "").is_ok() {
+        return Err("S. session_sql SUCCEEDED with no session".into());
+    }
+    session_begin(&dek, &blob, &[], &dir_cfg("pk-sess", "enc-session", false)).await?;
+    let rows2 = session_sql("app", "SELECT a,b,c,d,e FROM t", "").map_err(&js)?;
+    if rows2 != want {
+        return Err(format!("S. data changed across lock/reopen: got {rows2}, want {want}"));
+    }
+    session_lock().map_err(&js)?;
+
+    Ok("S.  session model: one open → typed params (null/int/float/string/bool) round-trip | \
+'app'/'notes' DBs isolated | bad names + multi-stmt-with-params rejected | lock kills ops | \
+reopen → data intact \u{2705}\n"
+        .into())
 }
 
 async fn run() -> std::result::Result<String, String> {
@@ -741,6 +824,9 @@ async fn run() -> std::result::Result<String, String> {
     r.push_str(&sync_epoch_test().await?);
     r.push('\n');
 
+    // ---- Section S: the session model (mock PRF — no gesture) ----------------------------------
+    r.push_str(&session_test().await?);
+
     r.push_str("\nALL MILESTONE-2+3 CHECKS PASSED.\n");
     Ok(r)
 }
@@ -754,15 +840,14 @@ pub async fn run_tests() -> String {
     }
 }
 
-// ============================ passkey-PRF demo API (build-spec M2) ============================
-// Driven by passkey.html's REAL WebAuthn-PRF ceremony. `prf` is the 32-byte PRF assertion output
-// (`results.first` from the WebAuthn `prf` extension). enroll() wraps a fresh random DEK under the
-// PRF-KEK and writes a secret row; unlock() unwraps the DEK from the returned blob and reads it
-// back — proving the DB opens ONLY when the same passkey re-derives the same PRF output.
+// ============================ passkey-PRF vault API (build-spec M2) ============================
+// Driven by passkey.html's REAL WebAuthn-PRF ceremony (via the @freehold/db SDK). `prf` is the
+// 32-byte PRF assertion output (`results.first` from the WebAuthn `prf` extension). enroll() wraps
+// a fresh random DEK under the PRF-KEK and initializes an empty vault pool; everything key-
+// requiring after that goes through the SESSION surface below (session_open/.../session_lock) —
+// one ceremony per session, not one per query.
 
-const DEMO_DB: &str = "passkey-demo.db";
 const DEMO_DIR: &str = "enc-passkey";
-const DEMO_SECRET: &str = "unlocked-by-your-passkey \u{1f510}";
 
 fn demo_cfg(name: &str, clear: bool) -> vfs::OpfsSAHPoolCfg {
     OpfsSAHPoolCfgBuilder::new()
@@ -780,58 +865,21 @@ async fn enroll_inner(prf: &[u8]) -> std::result::Result<Vec<u8>, String> {
     let dek = envelope::random_dek().map_err(|e| format!("random_dek: {e:?}"))?;
     let blob = envelope::create_envelope(&dek, prf).map_err(|e| format!("create_envelope: {e:?}"))?;
 
+    // Initialize an EMPTY vault pool (clear_on_init wipes any prior enrollment's ciphertext).
+    // No schema is created here — the app defines its own via session_sql after session_open.
     let util = vfs::install::<ffi::WasmOsCallback>(&demo_cfg("pk-enroll", true), true, &dek)
         .await
         .map_err(|e| format!("install: {e:?}"))?;
-    unsafe {
-        let db = open_default(DEMO_DB)?;
-        set_pragmas(db)?;
-        exec(db, "CREATE TABLE IF NOT EXISTS secret(v TEXT)")?;
-        exec(db, "DELETE FROM secret")?;
-        exec(db, &format!("INSERT INTO secret(v) VALUES ('{DEMO_SECRET}')"))?;
-        ffi::sqlite3_close(db);
-    }
     util.pause_vfs().map_err(|e| format!("pause: {e:?}"))?;
     // Return the envelope blob for the caller to persist; the DEK never leaves wasm memory.
     Ok(blob)
 }
 
-async fn unlock_inner(prf: &[u8], blob: &[u8], epoch: &[u8]) -> std::result::Result<String, String> {
-    let dek = envelope::open_with_prf(blob, prf)
-        .map_err(|_| "unlock failed — wrong passkey, wrong PRF/UV state, or tampered envelope".to_string())?;
-
-    let util = vfs::install::<ffi::WasmOsCallback>(&demo_cfg("pk-unlock", false), true, &dek)
-        .await
-        .map_err(|e| format!("install: {e:?}"))?;
-    // sync-epoch: apply any peer epoch BEFORE opening so a rollback below it is refused at open.
-    if !epoch.is_empty() {
-        util.apply_epoch(epoch).map_err(|e| format!("apply_epoch: {e:?}"))?;
-    }
-    let row = unsafe {
-        let db = open_default(DEMO_DB)
-            .map_err(|e| format!("open rejected (rollback below a peer epoch, or wrong key): {e}"))?;
-        set_pragmas(db)?;
-        let v = scalar_text(db, "SELECT v FROM secret ORDER BY rowid LIMIT 1")?;
-        ffi::sqlite3_close(db);
-        v
-    };
-    util.pause_vfs().map_err(|e| format!("pause: {e:?}"))?;
-    Ok(row)
-}
-
-/// Enroll: wrap a fresh DEK under the PRF-KEK, create the demo DB, return the envelope blob.
+/// Enroll: wrap a fresh DEK under the PRF-KEK, initialize an empty vault, return the envelope blob.
 #[wasm_bindgen]
 pub async fn enroll(prf: &[u8]) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
     enroll_inner(prf).await.map_err(|e| JsValue::from_str(&e))
-}
-
-/// Unlock: apply any peer `epoch` token (freshness), unwrap the DEK via the PRF, open the DB,
-/// return the secret row. Pass an empty slice for `epoch` when there's no peer epoch to apply.
-#[wasm_bindgen]
-pub async fn unlock(prf: &[u8], blob: &[u8], epoch: &[u8]) -> Result<String, JsValue> {
-    console_error_panic_hook::set_once();
-    unlock_inner(prf, blob, epoch).await.map_err(|e| JsValue::from_str(&e))
 }
 
 // ---- M3: N-KEK envelope management (pure re-wrap ops — no DB re-encryption) ----
@@ -901,95 +949,11 @@ pub fn list_methods(blob: &[u8]) -> Result<String, JsValue> {
     Ok(s)
 }
 
-/// Unlock with the recovery code instead of a passkey: derive the Argon2id KEK, unwrap the DEK,
-/// open the DB, return the secret row.
-#[wasm_bindgen]
-pub async fn unlock_recovery(code: &str, blob: &[u8], epoch: &[u8]) -> Result<String, JsValue> {
-    console_error_panic_hook::set_once();
-    let dek = envelope::open_with_recovery(blob, code)
-        .map_err(|_| JsValue::from_str("recovery code did not unlock — wrong code or tampered envelope"))?;
-    let util = vfs::install::<ffi::WasmOsCallback>(&demo_cfg("pk-recover", false), true, &dek)
-        .await
-        .map_err(|e| JsValue::from_str(&format!("install: {e:?}")))?;
-    if !epoch.is_empty() {
-        util.apply_epoch(epoch).map_err(|e| JsValue::from_str(&format!("apply_epoch: {e:?}")))?;
-    }
-    let row = unsafe {
-        let db = open_default(DEMO_DB).map_err(|e| JsValue::from_str(&format!("open: {e}")))?;
-        let _ = set_pragmas(db);
-        let v = scalar_text(db, "SELECT v FROM secret ORDER BY rowid LIMIT 1")
-            .map_err(|e| JsValue::from_str(&e))?;
-        ffi::sqlite3_close(db);
-        v
-    };
-    util.pause_vfs().map_err(|e| JsValue::from_str(&format!("pause: {e:?}")))?;
-    Ok(row)
-}
-
-// ---- M3 cross-device: export/import the ENCRYPTED DB image (no key inside) ----
-// A dummy DEK is fine here: export reads raw ciphertext and import writes raw ciphertext — neither
-// touches the block-device crypto. The image only decrypts later under the real DEK (passkey/recovery).
+// ---- M3 cross-device: import the ENCRYPTED DB image (no key inside) ----
+// A dummy DEK is fine here: import writes raw ciphertext and never touches the block-device
+// crypto. The image only decrypts later under the real DEK (passkey/recovery). Export moved to
+// `session_export` (the live session's DEK mints the freshness epoch — no PRF re-prompt).
 const DUMMY_DEK: [u8; 32] = [0u8; 32];
-
-/// Add a row to the demo DB (advances db_generation) so you can create a v1/v2 pair for the live
-/// two-device rollback test. Applies any peer epoch first, then commits a new note.
-#[wasm_bindgen]
-pub async fn add_note(prf: &[u8], blob: &[u8], epoch: &[u8]) -> Result<String, JsValue> {
-    console_error_panic_hook::set_once();
-    let dek = envelope::open_with_prf(blob, prf)
-        .map_err(|_| JsValue::from_str("unlock failed — cannot add data"))?;
-    let util = vfs::install::<ffi::WasmOsCallback>(&demo_cfg("pk-note", false), true, &dek)
-        .await
-        .map_err(|e| JsValue::from_str(&format!("install: {e:?}")))?;
-    if !epoch.is_empty() {
-        util.apply_epoch(epoch).map_err(|e| JsValue::from_str(&format!("apply_epoch: {e:?}")))?;
-    }
-    let n = unsafe {
-        let db = open_default(DEMO_DB).map_err(|e| JsValue::from_str(&format!("open: {e}")))?;
-        set_pragmas(db).map_err(|e| JsValue::from_str(&e))?;
-        exec(db, "CREATE TABLE IF NOT EXISTS secret(v TEXT)").map_err(|e| JsValue::from_str(&e))?;
-        exec(db, "INSERT INTO secret(v) VALUES ('note @ ' || datetime('now'))")
-            .map_err(|e| JsValue::from_str(&e))?;
-        let n = scalar_i64(db, "SELECT count(*) FROM secret").unwrap_or(0);
-        ffi::sqlite3_close(db);
-        n
-    };
-    util.pause_vfs().map_err(|e| JsValue::from_str(&format!("pause: {e:?}")))?;
-    Ok(format!("added a note (DB now has {n} rows — a newer version). Export a fresh bundle."))
-}
-
-/// Export a self-contained binary `.freehold` bundle: envelope + credential id + the encrypted DB
-/// image + a freshly minted sync-epoch token (bundle.rs TLV). The image is DEK-free; the epoch
-/// token is DEK-authenticated freshness. Needs the passkey PRF to mint the epoch. Pass an empty
-/// `cred_id` slice if there is none to embed (e.g. recovery-only flows).
-#[wasm_bindgen]
-pub async fn export_db(prf: &[u8], blob: &[u8], cred_id: &[u8]) -> Result<Vec<u8>, JsValue> {
-    console_error_panic_hook::set_once();
-    let dek = envelope::open_with_prf(blob, prf)
-        .map_err(|_| JsValue::from_str("unlock failed — cannot mint a freshness epoch for export"))?;
-    let util = vfs::install::<ffi::WasmOsCallback>(&demo_cfg("pk-export", false), true, &dek)
-        .await
-        .map_err(|e| JsValue::from_str(&format!("install: {e:?}")))?;
-    // The vfs testing-api export surface speaks `name|hex` lines; decode to bytes at this boundary
-    // (vfs.rs deliberately untouched) and pack them as binary file sections.
-    let text = util
-        .export_bundle(DEMO_DB)
-        .map_err(|e| JsValue::from_str(&format!("export: {e:?}")))?;
-    let epoch = util
-        .export_epoch(DEMO_DB)
-        .map_err(|e| JsValue::from_str(&format!("export_epoch: {e:?}")))?;
-    util.pause_vfs().map_err(|e| JsValue::from_str(&format!("pause: {e:?}")))?;
-    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-    for line in text.lines() {
-        let Some((name, hex)) = line.split_once('|') else { continue };
-        let data = hex_to_bytes(hex).map_err(|e| JsValue::from_str(&e))?;
-        files.push((name.to_string(), data));
-    }
-    if files.is_empty() {
-        return Err(JsValue::from_str("nothing to export — enroll and create the DB first"));
-    }
-    Ok(bundle::encode(blob, cred_id, &files, &epoch))
-}
 
 /// Import a binary bundle (from `export_db`). Writes the ciphertext files into a fresh pool and
 /// returns `{ envelope, credId, epoch }` (Uint8Array fields; credId/epoch empty if absent) — the
@@ -1020,11 +984,12 @@ pub async fn import_bundle(bytes: &[u8]) -> Result<JsValue, JsValue> {
     Ok(out.into())
 }
 
-// ============================ generic SQL surface (SDK — schema-agnostic) ============================
-// The @freehold/db SDK must not be bound to the demo schema: run arbitrary SQL against the same
-// demo-path DB (demo_cfg/DEMO_DB) that enroll() creates. Rows come back as a JSON array of row
-// arrays with every value stringified (NULL → null). JSON is built by hand — no serde in this
-// crate by design (keep the dependency surface small and reviewable).
+// ============================ session + SQL surface (SDK — schema-agnostic) ============================
+// The @freehold/db SDK must not be bound to any schema: after `session_open` unwraps the DEK ONCE
+// (one WebAuthn ceremony), arbitrary SQL runs against named DBs in the session's pool until
+// `session_lock`. Rows come back as a JSON array of row arrays with every value stringified
+// (NULL → null). JSON output is built by hand — no serde in this crate by design (keep the
+// dependency surface small and reviewable); params_json input is parsed via js_sys::JSON.
 
 fn json_escape_into(out: &mut String, s: &str) {
     out.push('"');
@@ -1040,6 +1005,34 @@ fn json_escape_into(out: &mut String, s: &str) {
         }
     }
     out.push('"');
+}
+
+/// Serialize the current SQLITE_ROW of `stmt` into `out` as a JSON array of stringified values
+/// (NULL → null). Shared by the multi-statement and parameterized query paths.
+unsafe fn push_row_json(stmt: *mut ffi::sqlite3_stmt, out: &mut String, first_row: &mut bool) {
+    if !*first_row {
+        out.push(',');
+    }
+    *first_row = false;
+    out.push('[');
+    let ncol = ffi::sqlite3_column_count(stmt);
+    for i in 0..ncol {
+        if i > 0 {
+            out.push(',');
+        }
+        if ffi::sqlite3_column_type(stmt, i) == ffi::SQLITE_NULL {
+            out.push_str("null");
+        } else {
+            let t = ffi::sqlite3_column_text(stmt, i);
+            let s = if t.is_null() {
+                String::new()
+            } else {
+                CStr::from_ptr(t.cast()).to_string_lossy().into_owned()
+            };
+            json_escape_into(out, &s);
+        }
+    }
+    out.push(']');
 }
 
 /// Prepare/step every statement in `sql` (multi-statement scripts allowed — the prepare tail is
@@ -1063,29 +1056,7 @@ unsafe fn query_json(db: *mut ffi::sqlite3, sql: &str) -> std::result::Result<St
             loop {
                 let step = ffi::sqlite3_step(stmt);
                 if step == ffi::SQLITE_ROW {
-                    if !first_row {
-                        out.push(',');
-                    }
-                    first_row = false;
-                    out.push('[');
-                    let ncol = ffi::sqlite3_column_count(stmt);
-                    for i in 0..ncol {
-                        if i > 0 {
-                            out.push(',');
-                        }
-                        if ffi::sqlite3_column_type(stmt, i) == ffi::SQLITE_NULL {
-                            out.push_str("null");
-                        } else {
-                            let t = ffi::sqlite3_column_text(stmt, i);
-                            let s = if t.is_null() {
-                                String::new()
-                            } else {
-                                CStr::from_ptr(t.cast()).to_string_lossy().into_owned()
-                            };
-                            json_escape_into(&mut out, &s);
-                        }
-                    }
-                    out.push(']');
+                    push_row_json(stmt, &mut out, &mut first_row);
                 } else if step == ffi::SQLITE_DONE {
                     break;
                 } else {
@@ -1105,42 +1076,291 @@ unsafe fn query_json(db: *mut ffi::sqlite3, sql: &str) -> std::result::Result<St
     Ok(out)
 }
 
-/// Shared body for run_sql/run_sql_recovery once the DEK is unwrapped: install on the demo path,
-/// apply any peer epoch BEFORE opening (mirrors unlock), execute, return the JSON rows.
-async fn sql_inner(dek: &[u8; 32], vfs_name: &str, epoch: &[u8], sql: &str) -> std::result::Result<String, String> {
-    let util = vfs::install::<ffi::WasmOsCallback>(&demo_cfg(vfs_name, false), true, dek)
+/// Prepare ONE statement, bind `params`, step, return the JSON rows. With params the prepare must
+/// consume the whole string — a non-empty tail means a second statement smuggled after the bound
+/// one, which is rejected (the params would silently not apply to it).
+/// Bindings: null→NULL, boolean→0/1 int, number→int64 when integral else double, string→text.
+/// (Blob params are DEFERRED — pass blobs as hex/base64 text for now.)
+unsafe fn query_json_params(
+    db: *mut ffi::sqlite3,
+    sql: &str,
+    params: &js_sys::Array,
+) -> std::result::Result<String, String> {
+    let csql = CString::new(sql).map_err(|_| "SQL contains a NUL byte".to_string())?;
+    let mut stmt = ptr::null_mut();
+    let mut tail: *const c_char = ptr::null();
+    let rc = ffi::sqlite3_prepare_v2(db, csql.as_ptr(), -1, &mut stmt, &mut tail);
+    if rc != ffi::SQLITE_OK {
+        let msg = CStr::from_ptr(ffi::sqlite3_errmsg(db)).to_string_lossy().into_owned();
+        return Err(format!("prepare rc={rc}: {msg}"));
+    }
+    if stmt.is_null() {
+        return Err("no statement in SQL".into());
+    }
+    if !tail.is_null() && !CStr::from_ptr(tail).to_string_lossy().trim().is_empty() {
+        ffi::sqlite3_finalize(stmt);
+        return Err("params require a single statement".into());
+    }
+    let want = ffi::sqlite3_bind_parameter_count(stmt) as u32;
+    if want != params.length() {
+        ffi::sqlite3_finalize(stmt);
+        return Err(format!("SQL has {want} parameter(s) but {} were supplied", params.length()));
+    }
+    for (i, v) in params.iter().enumerate() {
+        let idx = (i + 1) as i32;
+        let rc = if v.is_null() {
+            ffi::sqlite3_bind_null(stmt, idx)
+        } else if let Some(b) = v.as_bool() {
+            ffi::sqlite3_bind_int64(stmt, idx, i64::from(b))
+        } else if let Some(f) = v.as_f64() {
+            // Integral doubles within the f64-exact range bind as INTEGER, everything else as REAL.
+            if f.fract() == 0.0 && f.abs() <= 9_007_199_254_740_992.0 {
+                ffi::sqlite3_bind_int64(stmt, idx, f as i64)
+            } else {
+                ffi::sqlite3_bind_double(stmt, idx, f)
+            }
+        } else if let Some(s) = v.as_string() {
+            let n = s.len() as i32;
+            let cs = match CString::new(s) {
+                Ok(cs) => cs,
+                Err(_) => {
+                    ffi::sqlite3_finalize(stmt);
+                    return Err(format!("param {i} contains a NUL byte"));
+                }
+            };
+            ffi::sqlite3_bind_text(stmt, idx, cs.as_ptr(), n, ffi::SQLITE_TRANSIENT())
+        } else {
+            ffi::sqlite3_finalize(stmt);
+            return Err(format!(
+                "param {i}: unsupported type (allowed: null, boolean, number, string; blobs deferred)"
+            ));
+        };
+        if rc != ffi::SQLITE_OK {
+            let msg = CStr::from_ptr(ffi::sqlite3_errmsg(db)).to_string_lossy().into_owned();
+            ffi::sqlite3_finalize(stmt);
+            return Err(format!("bind param {i} rc={rc}: {msg}"));
+        }
+    }
+    let mut out = String::from("[");
+    let mut first_row = true;
+    loop {
+        let step = ffi::sqlite3_step(stmt);
+        if step == ffi::SQLITE_ROW {
+            push_row_json(stmt, &mut out, &mut first_row);
+        } else if step == ffi::SQLITE_DONE {
+            break;
+        } else {
+            let msg = CStr::from_ptr(ffi::sqlite3_errmsg(db)).to_string_lossy().into_owned();
+            ffi::sqlite3_finalize(stmt);
+            return Err(format!("step rc={step}: {msg}"));
+        }
+    }
+    ffi::sqlite3_finalize(stmt);
+    out.push(']');
+    Ok(out)
+}
+
+// ---- the session (Feature: one ceremony, many queries) ----
+// Wasm in a dedicated worker is single-threaded, so a thread_local holds the one live session:
+// the installed pool util plus the open sqlite3 handles per named DB. The Session itself never
+// holds key material — the DEK/subkeys live inside the pool's Crypto structs (vfs.rs), reachable
+// only through the VFS.
+
+struct Session {
+    util: OpfsSAHPoolUtil,
+    /// The envelope blob the session was opened with — non-secret ciphertext, retained so
+    /// `session_export` can embed it in the bundle without a re-prompt.
+    envelope: Vec<u8>,
+    /// Open connection per named DB file ("<name>.db"), all closed on lock.
+    handles: HashMap<String, *mut ffi::sqlite3>,
+}
+
+thread_local! {
+    static SESSION: RefCell<Option<Session>> = const { RefCell::new(None) };
+}
+
+const SESSION_VFS: &str = "pk-session";
+
+/// A named DB becomes OPFS file "<name>.db" — validate strictly (`[a-z0-9_-]{1,32}`) so a name can
+/// never smuggle a path, a `#manifest` suffix, or a satellite (`-journal`) collision.
+fn valid_db_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 32
+        && name.bytes().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'))
+}
+
+/// Install the pool once and store the session. Idempotent: a live session is locked first, so a
+/// second `session_open` (e.g. after a passkey re-prompt) can never leak handles.
+async fn session_begin(
+    dek: &[u8; 32],
+    envelope: &[u8],
+    epoch: &[u8],
+    cfg: &vfs::OpfsSAHPoolCfg,
+) -> std::result::Result<(), String> {
+    session_lock_inner()?;
+    let util = vfs::install::<ffi::WasmOsCallback>(cfg, true, dek)
         .await
         .map_err(|e| format!("install: {e:?}"))?;
+    // sync-epoch: apply any peer epoch BEFORE anything opens so a rollback below it is refused.
     if !epoch.is_empty() {
         util.apply_epoch(epoch).map_err(|e| format!("apply_epoch: {e:?}"))?;
     }
-    let rows = unsafe {
-        let db = open_default(DEMO_DB)
-            .map_err(|e| format!("open rejected (rollback below a peer epoch, or wrong key): {e}"))?;
-        set_pragmas(db)?;
-        let res = query_json(db, sql);
-        ffi::sqlite3_close(db);
-        res?
-    };
-    util.pause_vfs().map_err(|e| format!("pause: {e:?}"))?;
-    Ok(rows)
+    SESSION.with(|s| {
+        *s.borrow_mut() = Some(Session { util, envelope: envelope.to_vec(), handles: HashMap::new() })
+    });
+    Ok(())
 }
 
-/// Run arbitrary SQL after a passkey-PRF unlock. Returns a JSON array of row arrays (stringified
-/// values, NULL → null); statements that return no rows yield "[]".
+/// Close every sqlite3 handle and tear the pool down. `pause_vfs` is the strongest teardown the
+/// sahpool surface offers: it unregisters the VFS from SQLite and `release_access_handles()`
+/// closes EVERY FileSystemSyncAccessHandle (data files + anchor) — SAH close releases the OPFS
+/// exclusive locks, so another tab can acquire the pool afterwards. It also clears the per-DB
+/// `DbState`/`Crypto` subkeys. Known residual: the pool's registration appdata (holding the
+/// Zeroizing DEK + pool/anchor subkeys) is a leaked `'static` and survives until the worker dies —
+/// same as the pre-session per-op design; a locked session still cannot reach it (no VFS, no
+/// handles). No-op when no session is live.
+fn session_lock_inner() -> std::result::Result<(), String> {
+    let Some(mut s) = SESSION.with(|cell| cell.borrow_mut().take()) else {
+        return Ok(());
+    };
+    for (_, db) in s.handles.drain() {
+        unsafe {
+            ffi::sqlite3_close(db);
+        }
+    }
+    s.util.pause_vfs().map_err(|e| format!("session_lock pause: {e:?}"))?;
+    Ok(())
+}
+
+/// Open a session: unwrap the DEK via the passkey PRF (ONE ceremony), apply any peer epoch,
+/// install the VFS, and hold it all until `session_lock`. Every subsequent `session_sql` /
+/// `session_export` rides this session with no further prompts.
 #[wasm_bindgen]
-pub async fn run_sql(prf: &[u8], blob: &[u8], epoch: &[u8], sql: &str) -> Result<String, JsValue> {
+pub async fn session_open(prf: &[u8], blob: &[u8], epoch: &[u8]) -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
     let dek = envelope::open_with_prf(blob, prf)
         .map_err(|_| JsValue::from_str("unlock failed — wrong passkey, wrong PRF/UV state, or tampered envelope"))?;
-    sql_inner(&dek, "pk-sql", epoch, sql).await.map_err(|e| JsValue::from_str(&e))
+    session_begin(&dek, blob, epoch, &demo_cfg(SESSION_VFS, false))
+        .await
+        .map_err(|e| JsValue::from_str(&e))
 }
 
-/// Run arbitrary SQL after a recovery-code unlock (same semantics as `run_sql`).
+/// Open a session with the written recovery code instead of a passkey (same semantics).
 #[wasm_bindgen]
-pub async fn run_sql_recovery(code: &str, blob: &[u8], epoch: &[u8], sql: &str) -> Result<String, JsValue> {
+pub async fn session_open_recovery(code: &str, blob: &[u8], epoch: &[u8]) -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
     let dek = envelope::open_with_recovery(blob, code)
         .map_err(|_| JsValue::from_str("recovery code did not unlock — wrong code or tampered envelope"))?;
-    sql_inner(&dek, "pk-sql-rec", epoch, sql).await.map_err(|e| JsValue::from_str(&e))
+    session_begin(&dek, blob, epoch, &demo_cfg(SESSION_VFS, false))
+        .await
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Lock the session: close handles, release the pool (see `session_lock_inner`), drop the session.
+#[wasm_bindgen]
+pub fn session_lock() -> Result<(), JsValue> {
+    session_lock_inner().map_err(|e| JsValue::from_str(&e))
+}
+
+/// Is a session currently open?
+#[wasm_bindgen]
+pub fn session_active() -> bool {
+    SESSION.with(|s| s.borrow().is_some())
+}
+
+fn session_sql_inner(db: &str, sql: &str, params_json: &str) -> std::result::Result<String, String> {
+    if !valid_db_name(db) {
+        return Err(format!("invalid db name {db:?} — must match [a-z0-9_-]{{1,32}}"));
+    }
+    // Parse params OUTSIDE the borrow (js_sys::JSON keeps the no-serde rule; input came from JS).
+    let params = match params_json.trim() {
+        "" | "[]" => None,
+        s => {
+            let v = js_sys::JSON::parse(s).map_err(|_| "params_json is not valid JSON".to_string())?;
+            if !js_sys::Array::is_array(&v) {
+                return Err("params_json must be a JSON array".into());
+            }
+            Some(js_sys::Array::from(&v))
+        }
+    };
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let s = guard
+            .as_mut()
+            .ok_or_else(|| "no active session — call session_open first".to_string())?;
+        let file = format!("{db}.db");
+        let handle = match s.handles.get(&file) {
+            Some(&h) => h,
+            None => unsafe {
+                let h = open_default(&file)
+                    .map_err(|e| format!("open rejected (rollback below a peer epoch, or wrong key): {e}"))?;
+                if let Err(e) = set_pragmas(h) {
+                    ffi::sqlite3_close(h);
+                    return Err(e);
+                }
+                s.handles.insert(file, h);
+                h
+            },
+        };
+        unsafe {
+            match &params {
+                Some(p) => query_json_params(handle, sql, p),
+                None => query_json(handle, sql),
+            }
+        }
+    })
+}
+
+/// Run SQL against named DB `db` in the live session. `params_json` is a JSON array bound to `?`
+/// placeholders (empty string or "[]" = none; then multi-statement scripts are allowed). Returns
+/// a JSON array of row arrays (stringified values, NULL → null); no rows yields "[]".
+#[wasm_bindgen]
+pub fn session_sql(db: &str, sql: &str, params_json: &str) -> Result<String, JsValue> {
+    console_error_panic_hook::set_once();
+    session_sql_inner(db, sql, params_json).map_err(|e| JsValue::from_str(&e))
+}
+
+fn session_export_inner(cred_id: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    SESSION.with(|cell| {
+        let guard = cell.borrow();
+        let s = guard
+            .as_ref()
+            .ok_or_else(|| "no active session — call session_open first".to_string())?;
+        // Every main DB in the pool goes into the bundle (the TLV carries per-file sections; the
+        // vfs export surface speaks `name|hex` per DB — decode at this boundary, vfs.rs untouched).
+        let mut db_names: Vec<String> =
+            s.util.list().into_iter().filter(|n| n.ends_with(".db")).collect();
+        db_names.sort();
+        let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+        for name in &db_names {
+            let text = s.util.export_bundle(name).map_err(|e| format!("export {name}: {e:?}"))?;
+            for line in text.lines() {
+                let Some((n, hex)) = line.split_once('|') else { continue };
+                files.push((n.to_string(), hex_to_bytes(hex)?));
+            }
+        }
+        if files.is_empty() {
+            return Err("nothing to export — run some SQL to create a database first".into());
+        }
+        // One epoch token per bundle: mint it for the primary DB ("app" when present). The live
+        // session's DEK signs it — no PRF re-prompt, which is the point of the session.
+        let epoch_db = db_names
+            .iter()
+            .find(|n| n.as_str() == "app.db")
+            .unwrap_or(&db_names[0]);
+        let epoch = s
+            .util
+            .export_epoch(epoch_db)
+            .map_err(|e| format!("export_epoch {epoch_db}: {e:?}"))?;
+        Ok(bundle::encode(&s.envelope, cred_id, &files, &epoch))
+    })
+}
+
+/// Export the binary `.freehold` bundle from the LIVE session: envelope + credential id + the
+/// encrypted image of every DB in the pool + a freshly minted sync-epoch token. No key inside.
+/// Pass an empty `cred_id` slice if there is none to embed (e.g. recovery-only flows).
+#[wasm_bindgen]
+pub fn session_export(cred_id: &[u8]) -> Result<Vec<u8>, JsValue> {
+    console_error_panic_hook::set_once();
+    session_export_inner(cred_id).map_err(|e| JsValue::from_str(&e))
 }

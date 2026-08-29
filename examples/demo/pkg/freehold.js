@@ -1,25 +1,6 @@
 /* @ts-self-types="./freehold.d.ts" */
 
 /**
- * Add a row to the demo DB (advances db_generation) so you can create a v1/v2 pair for the live
- * two-device rollback test. Applies any peer epoch first, then commits a new note.
- * @param {Uint8Array} prf
- * @param {Uint8Array} blob
- * @param {Uint8Array} epoch
- * @returns {Promise<string>}
- */
-export function add_note(prf, blob, epoch) {
-    const ptr0 = passArray8ToWasm0(prf, wasm.__wbindgen_malloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passArray8ToWasm0(blob, wasm.__wbindgen_malloc);
-    const len1 = WASM_VECTOR_LEN;
-    const ptr2 = passArray8ToWasm0(epoch, wasm.__wbindgen_malloc);
-    const len2 = WASM_VECTOR_LEN;
-    const ret = wasm.add_note(ptr0, len0, ptr1, len1, ptr2, len2);
-    return ret;
-}
-
-/**
  * Add a second passkey method: unlock with the existing PRF, wrap the DEK under the new PRF.
  * @param {Uint8Array} existing_prf
  * @param {Uint8Array} new_prf
@@ -67,7 +48,7 @@ export function add_recovery(existing_prf, code, blob) {
 }
 
 /**
- * Enroll: wrap a fresh DEK under the PRF-KEK, create the demo DB, return the envelope blob.
+ * Enroll: wrap a fresh DEK under the PRF-KEK, initialize an empty vault, return the envelope blob.
  * @param {Uint8Array} prf
  * @returns {Promise<Uint8Array>}
  */
@@ -75,27 +56,6 @@ export function enroll(prf) {
     const ptr0 = passArray8ToWasm0(prf, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ret = wasm.enroll(ptr0, len0);
-    return ret;
-}
-
-/**
- * Export a self-contained binary `.freehold` bundle: envelope + credential id + the encrypted DB
- * image + a freshly minted sync-epoch token (bundle.rs TLV). The image is DEK-free; the epoch
- * token is DEK-authenticated freshness. Needs the passkey PRF to mint the epoch. Pass an empty
- * `cred_id` slice if there is none to embed (e.g. recovery-only flows).
- * @param {Uint8Array} prf
- * @param {Uint8Array} blob
- * @param {Uint8Array} cred_id
- * @returns {Promise<Uint8Array>}
- */
-export function export_db(prf, blob, cred_id) {
-    const ptr0 = passArray8ToWasm0(prf, wasm.__wbindgen_malloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passArray8ToWasm0(blob, wasm.__wbindgen_malloc);
-    const len1 = WASM_VECTOR_LEN;
-    const ptr2 = passArray8ToWasm0(cred_id, wasm.__wbindgen_malloc);
-    const len2 = WASM_VECTOR_LEN;
-    const ret = wasm.export_db(ptr0, len0, ptr1, len1, ptr2, len2);
     return ret;
 }
 
@@ -182,49 +142,6 @@ export function remove_method(kek_id, blob) {
 }
 
 /**
- * Run arbitrary SQL after a passkey-PRF unlock. Returns a JSON array of row arrays (stringified
- * values, NULL → null); statements that return no rows yield "[]".
- * @param {Uint8Array} prf
- * @param {Uint8Array} blob
- * @param {Uint8Array} epoch
- * @param {string} sql
- * @returns {Promise<string>}
- */
-export function run_sql(prf, blob, epoch, sql) {
-    const ptr0 = passArray8ToWasm0(prf, wasm.__wbindgen_malloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passArray8ToWasm0(blob, wasm.__wbindgen_malloc);
-    const len1 = WASM_VECTOR_LEN;
-    const ptr2 = passArray8ToWasm0(epoch, wasm.__wbindgen_malloc);
-    const len2 = WASM_VECTOR_LEN;
-    const ptr3 = passStringToWasm0(sql, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-    const len3 = WASM_VECTOR_LEN;
-    const ret = wasm.run_sql(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
-    return ret;
-}
-
-/**
- * Run arbitrary SQL after a recovery-code unlock (same semantics as `run_sql`).
- * @param {string} code
- * @param {Uint8Array} blob
- * @param {Uint8Array} epoch
- * @param {string} sql
- * @returns {Promise<string>}
- */
-export function run_sql_recovery(code, blob, epoch, sql) {
-    const ptr0 = passStringToWasm0(code, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passArray8ToWasm0(blob, wasm.__wbindgen_malloc);
-    const len1 = WASM_VECTOR_LEN;
-    const ptr2 = passArray8ToWasm0(epoch, wasm.__wbindgen_malloc);
-    const len2 = WASM_VECTOR_LEN;
-    const ptr3 = passStringToWasm0(sql, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-    const len3 = WASM_VECTOR_LEN;
-    const ret = wasm.run_sql_recovery(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
-    return ret;
-}
-
-/**
  * @returns {Promise<string>}
  */
 export function run_tests() {
@@ -233,45 +150,122 @@ export function run_tests() {
 }
 
 /**
- * Unlock: apply any peer `epoch` token (freshness), unwrap the DEK via the PRF, open the DB,
- * return the secret row. Pass an empty slice for `epoch` when there's no peer epoch to apply.
+ * Is a session currently open?
+ * @returns {boolean}
+ */
+export function session_active() {
+    const ret = wasm.session_active();
+    return ret !== 0;
+}
+
+/**
+ * Export the binary `.freehold` bundle from the LIVE session: envelope + credential id + the
+ * encrypted image of every DB in the pool + a freshly minted sync-epoch token. No key inside.
+ * Pass an empty `cred_id` slice if there is none to embed (e.g. recovery-only flows).
+ * @param {Uint8Array} cred_id
+ * @returns {Uint8Array}
+ */
+export function session_export(cred_id) {
+    const ptr0 = passArray8ToWasm0(cred_id, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.session_export(ptr0, len0);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
+ * Lock the session: close handles, release the pool (see `session_lock_inner`), drop the session.
+ */
+export function session_lock() {
+    const ret = wasm.session_lock();
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
+ * Open a session: unwrap the DEK via the passkey PRF (ONE ceremony), apply any peer epoch,
+ * install the VFS, and hold it all until `session_lock`. Every subsequent `session_sql` /
+ * `session_export` rides this session with no further prompts.
  * @param {Uint8Array} prf
  * @param {Uint8Array} blob
  * @param {Uint8Array} epoch
- * @returns {Promise<string>}
+ * @returns {Promise<void>}
  */
-export function unlock(prf, blob, epoch) {
+export function session_open(prf, blob, epoch) {
     const ptr0 = passArray8ToWasm0(prf, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passArray8ToWasm0(blob, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passArray8ToWasm0(epoch, wasm.__wbindgen_malloc);
     const len2 = WASM_VECTOR_LEN;
-    const ret = wasm.unlock(ptr0, len0, ptr1, len1, ptr2, len2);
+    const ret = wasm.session_open(ptr0, len0, ptr1, len1, ptr2, len2);
     return ret;
 }
 
 /**
- * Unlock with the recovery code instead of a passkey: derive the Argon2id KEK, unwrap the DEK,
- * open the DB, return the secret row.
+ * Open a session with the written recovery code instead of a passkey (same semantics).
  * @param {string} code
  * @param {Uint8Array} blob
  * @param {Uint8Array} epoch
- * @returns {Promise<string>}
+ * @returns {Promise<void>}
  */
-export function unlock_recovery(code, blob, epoch) {
+export function session_open_recovery(code, blob, epoch) {
     const ptr0 = passStringToWasm0(code, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passArray8ToWasm0(blob, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passArray8ToWasm0(epoch, wasm.__wbindgen_malloc);
     const len2 = WASM_VECTOR_LEN;
-    const ret = wasm.unlock_recovery(ptr0, len0, ptr1, len1, ptr2, len2);
+    const ret = wasm.session_open_recovery(ptr0, len0, ptr1, len1, ptr2, len2);
     return ret;
+}
+
+/**
+ * Run SQL against named DB `db` in the live session. `params_json` is a JSON array bound to `?`
+ * placeholders (empty string or "[]" = none; then multi-statement scripts are allowed). Returns
+ * a JSON array of row arrays (stringified values, NULL → null); no rows yields "[]".
+ * @param {string} db
+ * @param {string} sql
+ * @param {string} params_json
+ * @returns {string}
+ */
+export function session_sql(db, sql, params_json) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const ptr0 = passStringToWasm0(db, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(sql, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(params_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.session_sql(ptr0, len0, ptr1, len1, ptr2, len2);
+        var ptr4 = ret[0];
+        var len4 = ret[1];
+        if (ret[3]) {
+            ptr4 = 0; len4 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred5_0 = ptr4;
+        deferred5_1 = len4;
+        return getStringFromWasm0(ptr4, len4);
+    } finally {
+        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+    }
 }
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
+        __wbg___wbindgen_boolean_get_c9c83ebd41b34df3: function(arg0) {
+            const v = arg0;
+            const ret = typeof(v) === 'boolean' ? v : undefined;
+            return isLikeNone(ret) ? 0xFFFFFF : ret ? 1 : 0;
+        },
         __wbg___wbindgen_debug_string_a57024b9c6e4a48b: function(arg0, arg1) {
             const ret = debugString(arg1);
             const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -287,6 +281,10 @@ function __wbg_get_imports() {
             const ret = typeof(arg0) === 'function';
             return ret;
         },
+        __wbg___wbindgen_is_null_7d13f41e1a2d5140: function(arg0) {
+            const ret = arg0 === null;
+            return ret;
+        },
         __wbg___wbindgen_is_object_a2790eb24c211ea0: function(arg0) {
             const val = arg0;
             const ret = typeof(val) === 'object' && val !== null;
@@ -299,6 +297,12 @@ function __wbg_get_imports() {
         __wbg___wbindgen_is_undefined_6cff064c44e0d823: function(arg0) {
             const ret = arg0 === undefined;
             return ret;
+        },
+        __wbg___wbindgen_number_get_136b9679cab35cfb: function(arg0, arg1) {
+            const obj = arg1;
+            const ret = typeof(obj) === 'number' ? obj : undefined;
+            getDataViewMemory0().setFloat64(arg0 + 8 * 1, isLikeNone(ret) ? 0 : ret, true);
+            getDataViewMemory0().setInt32(arg0 + 4 * 0, !isLikeNone(ret), true);
         },
         __wbg___wbindgen_string_get_d154f1e671052120: function(arg0, arg1) {
             const obj = arg1;
@@ -367,6 +371,10 @@ function __wbg_get_imports() {
         __wbg_flush_fc67ba80dfb8083f: function() { return handleError(function (arg0) {
             arg0.flush();
         }, arguments); },
+        __wbg_from_74f3d90e0ff11240: function(arg0) {
+            const ret = Array.from(arg0);
+            return ret;
+        },
         __wbg_getDate_b0ac858991e80b2e: function(arg0) {
             const ret = arg0.getDate();
             return ret;
@@ -441,6 +449,10 @@ function __wbg_get_imports() {
             const ret = arg0[arg1 >>> 0];
             return ret;
         },
+        __wbg_get_unchecked_e20b893aeafc3fca: function(arg0, arg1) {
+            const ret = arg0[arg1 >>> 0];
+            return ret;
+        },
         __wbg_instanceof_Object_80ad464782e2bd73: function(arg0) {
             let result;
             try {
@@ -461,7 +473,15 @@ function __wbg_get_imports() {
             const ret = result;
             return ret;
         },
+        __wbg_isArray_6339f732981044bf: function(arg0) {
+            const ret = Array.isArray(arg0);
+            return ret;
+        },
         __wbg_length_36bd29c6848c2144: function(arg0) {
+            const ret = arg0.length;
+            return ret;
+        },
+        __wbg_length_ecfa2c63d3d0d82c: function(arg0) {
             const ret = arg0.length;
             return ret;
         },
@@ -535,6 +555,10 @@ function __wbg_get_imports() {
             const ret = Date.now();
             return ret;
         },
+        __wbg_parse_1cc93481b0865939: function() { return handleError(function (arg0, arg1) {
+            const ret = JSON.parse(getStringFromWasm0(arg0, arg1));
+            return ret;
+        }, arguments); },
         __wbg_process_44c7a14e11e9f69e: function(arg0) {
             const ret = arg0.process;
             return ret;
@@ -653,7 +677,7 @@ function __wbg_get_imports() {
             return ret;
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 690, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 678, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__ha22148a4a7c1d5ff);
             return ret;
         },

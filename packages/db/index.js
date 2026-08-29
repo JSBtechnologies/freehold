@@ -86,6 +86,12 @@ export class FreeholdVault {
   #pending = new Map();
   #seq = 0;
   #rpName;
+  #releaseLock = null;   // resolves the Web Lock's callback promise (held until close())
+  #lockAfterMs = 0;      // rolling inactivity auto-lock; 0 = disabled
+  #lockTimer = null;
+
+  /** Did the browser grant persistent storage? (navigator.storage.persist(), non-fatal.) */
+  persisted = Promise.resolve(false);
 
   /** @private — use FreeholdVault.open() */
   constructor(worker, rpName) {
@@ -119,18 +125,50 @@ export class FreeholdVault {
    * `wasmUrl` (required): URL of the wasm-pack JS glue (e.g. `new URL('./pkg/freehold.js', import.meta.url)`).
    * `workerUrl` (optional): override the SDK's own vault-worker.js.
    * `rpName` (optional): WebAuthn relying-party display name.
+   * `lockAfterMs` (optional): auto-lock after this many ms of inactivity (rolling; 0/undefined off).
    */
-  static async open({ wasmUrl, workerUrl, rpName } = {}) {
+  static async open({ wasmUrl, workerUrl, rpName, lockAfterMs } = {}) {
     if (!wasmUrl) {
       throw new Error('FreeholdVault.open: wasmUrl is required (URL of the wasm-pack JS glue, e.g. pkg/freehold.js)');
+    }
+    // TAB-LOCK GUARD: the OPFS SAH pool is exclusive per origin, so a second tab would hit opaque
+    // handle-acquisition errors deep in the worker. Claim a Web Lock for the vault's lifetime
+    // instead (its callback promise stays pending until close() resolves it) and fail fast here.
+    // Feature-detected — some WebViews lack navigator.locks; they just skip the guard.
+    let releaseLock = null;
+    if (typeof navigator !== 'undefined' && navigator.locks) {
+      const acquired = await new Promise((resolve) => {
+        navigator.locks.request('freehold-vault', { ifAvailable: true }, (lock) => {
+          if (!lock) { resolve(false); return; }
+          resolve(true);
+          return new Promise((release) => { releaseLock = release; });
+        }).catch(() => resolve(false));
+      });
+      if (!acquired) {
+        throw new Error('This vault is already open in another tab — close it first.');
+      }
     }
     const worker = workerUrl
       ? new Worker(new URL(workerUrl, document.baseURI), { type: 'module' })
       : new Worker(new URL('./vault-worker.js', import.meta.url), { type: 'module' });
     const vault = new FreeholdVault(worker, rpName || DEFAULT_RP_NAME);
+    vault.#releaseLock = releaseLock;
+    vault.#lockAfterMs = lockAfterMs || 0;
+    // STORAGE PERSISTENCE: ask the browser not to evict OPFS under pressure. Best-effort and
+    // non-fatal; the answer (a boolean) is exposed as `vault.persisted`.
+    vault.persisted = (navigator.storage && navigator.storage.persist)
+      ? navigator.storage.persist().catch(() => false)
+      : Promise.resolve(false);
     // Resolve the glue URL on THIS thread — the worker's base URL differs from the page's.
     await vault.#call('init', [String(new URL(wasmUrl, document.baseURI))]);
     return vault;
+  }
+
+  // Rolling inactivity timer: every session op re-arms it; firing locks the vault.
+  #touch() {
+    if (!this.#lockAfterMs) return;
+    clearTimeout(this.#lockTimer);
+    this.#lockTimer = setTimeout(() => { this.lock().catch(() => {}); }, this.#lockAfterMs);
   }
 
   #call(op, args = [], transfer = []) {
@@ -156,9 +194,10 @@ export class FreeholdVault {
     return prf;
   }
 
-  /** Register a passkey, wrap a fresh DEK under its PRF-KEK, create the DB. Persists the
-   *  envelope + credential id in IndexedDB. */
+  /** Register a passkey, wrap a fresh DEK under its PRF-KEK, initialize an empty vault. Persists
+   *  the envelope + credential id in IndexedDB. Create your schema via sql() after unlock(). */
   async enroll() {
+    await this.lock(); // enrolling re-initializes the pool — a live session would hold its handles
     const credId = await registerPasskey(this.#rpName);
     let { prf } = await assertPrf(credId);
     const envelope = await this.#call('enroll', [prf], [prf.buffer]);
@@ -174,18 +213,33 @@ export class FreeholdVault {
     return !!(await idbGet('envelope'));
   }
 
-  /** Assert the passkey, unwrap the DEK, open the DB. Resolves to the demo secret row. */
+  /** Assert the passkey ONCE and open a session: the DEK stays unwrapped inside the worker's wasm
+   *  until lock(), so sql()/exportBundle() need no further prompts. */
   async unlock() {
     const envelope = await this.#envelope();
     let prf = await this.#prf();
-    const secret = await this.#call('unlock', [prf, envelope, await this.#epoch()], [prf.buffer]);
+    await this.#call('session_open', [prf, envelope, await this.#epoch()], [prf.buffer]);
     prf = null;
-    return secret;
+    this.#touch();
   }
 
-  /** Unlock with a written recovery code instead of a passkey. */
+  /** Open a session with a written recovery code instead of a passkey. */
   async unlockWithRecovery(code) {
-    return this.#call('unlock_recovery', [code, await this.#envelope(), await this.#epoch()]);
+    await this.#call('session_open_recovery', [code, await this.#envelope(), await this.#epoch()]);
+    this.#touch();
+  }
+
+  /** Lock the session: the worker closes every DB handle, releases the OPFS pool (another tab can
+   *  then open it) and drops the key-derived session state. Idempotent. */
+  async lock() {
+    clearTimeout(this.#lockTimer);
+    this.#lockTimer = null;
+    await this.#call('session_lock');
+  }
+
+  /** Is a session currently open? */
+  async isUnlocked() {
+    return this.#call('session_active');
   }
 
   /** Mint a fresh recovery code (does not add it — see addRecoveryCode). */
@@ -232,36 +286,34 @@ export class FreeholdVault {
     });
   }
 
-  /** Run SQL after a passkey unlock. Resolves to an array of row arrays; every value is a string
-   *  (SQL NULL → null). Multi-statement scripts are allowed. */
-  async sql(query) {
-    const envelope = await this.#envelope();
-    let prf = await this.#prf();
-    const rows = await this.#call('run_sql', [prf, envelope, await this.#epoch(), query], [prf.buffer]);
-    prf = null;
+  /** Run SQL in the open session (unlock() first — no prompt here, that's the point). `params` is
+   *  an array bound to `?` placeholders (null | boolean | number | string; blobs deferred) and
+   *  requires a single statement; with no params, multi-statement scripts are allowed. `db` names
+   *  the database ([a-z0-9_-]{1,32} → its own SQLite file in the vault). Resolves to an array of
+   *  row arrays; every value is a string (SQL NULL → null). */
+  async sql(query, params = [], db = 'app') {
+    this.#touch();
+    const rows = await this.#call('session_sql', [db, query, JSON.stringify(params)]);
     return JSON.parse(rows);
   }
 
-  /** Run SQL after a recovery-code unlock (same semantics as sql()). */
-  async sqlWithRecovery(code, query) {
-    const rows = await this.#call('run_sql_recovery', [code, await this.#envelope(), await this.#epoch(), query]);
-    return JSON.parse(rows);
-  }
-
-  /** Export the binary `.freehold` bundle: envelope + credential id + encrypted DB image + a
-   *  freshly minted sync-epoch token. No key inside. Requires a passkey assertion. */
+  /** Export the binary `.freehold` bundle from the open session: envelope + credential id + the
+   *  encrypted image of every DB in the vault + a freshly minted sync-epoch token. No key inside,
+   *  no extra prompt — the session's key mints the epoch. */
   async exportBundle() {
-    const envelope = await this.#envelope();
+    if (!(await this.isUnlocked())) {
+      throw new Error('vault is locked — call unlock() before exportBundle()');
+    }
+    this.#touch();
     const credId = (await idbGet('credId')) || new Uint8Array(0);
-    let prf = await this.#prf();
-    const bytes = await this.#call('export_db', [prf, envelope, credId], [prf.buffer]);
-    prf = null;
-    return bytes;
+    return this.#call('session_export', [credId]);
   }
 
   /** Import a `.freehold` bundle: writes the ciphertext files into OPFS and persists the bundled
-   *  envelope / credId / epoch. Unlock afterwards with the synced passkey or a recovery code. */
+   *  envelope / credId / epoch. Locks any open session first (the import replaces the pool);
+   *  unlock afterwards with the synced passkey or a recovery code. */
   async importBundle(bytes) {
+    await this.lock();
     const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
     // Only transfer when the view owns its whole buffer — never detach a caller's larger buffer.
     const transfer = (u8.byteOffset === 0 && u8.byteLength === u8.buffer.byteLength) ? [u8.buffer] : [];
@@ -280,8 +332,11 @@ export class FreeholdVault {
     await idbDel('epoch');
   }
 
-  /** Terminate the worker. The vault is unusable afterwards. */
+  /** Terminate the worker and release the cross-tab lock. The vault is unusable afterwards. */
   close() {
+    clearTimeout(this.#lockTimer);
+    this.#lockTimer = null;
+    if (this.#releaseLock) { this.#releaseLock(); this.#releaseLock = null; }
     this.#worker.terminate();
   }
 }

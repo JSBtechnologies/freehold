@@ -7,9 +7,10 @@ let wasm = null;
 
 // Ops the main thread may invoke — a fixed allowlist, NOT arbitrary property lookup on the module.
 const OPS = new Set([
-  'enroll', 'unlock', 'unlock_recovery', 'gen_recovery', 'add_recovery', 'add_passkey',
-  'remove_method', 'list_methods', 'add_note', 'export_db', 'import_bundle',
-  'run_sql', 'run_sql_recovery',
+  'enroll', 'gen_recovery', 'add_recovery', 'add_passkey', 'remove_method', 'list_methods',
+  'import_bundle',
+  'session_open', 'session_open_recovery', 'session_lock', 'session_active',
+  'session_sql', 'session_export',
 ]);
 
 // Hand result buffers back by transfer where possible (bundles can be MBs — don't copy them twice).
