@@ -1,0 +1,12 @@
+{
+  "name": "freehold-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Root dev harness: headless Playwright E2E for the @freehold/db sync() orchestration (WebAuthn virtual authenticator, two isolated contexts, Node-bridged blind relay).",
+  "scripts": {
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1"
+  }
+}

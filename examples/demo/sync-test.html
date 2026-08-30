@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>freehold — sync e2e harness (headless)</title>
+</head>
+<body>
+  <pre id="out">sync-test harness ready</pre>
+  <script type="module">
+    // Headless E2E harness page for the @freehold/db sync() orchestration.
+    // The Playwright test drives everything via window.FH.* over page.evaluate().
+    // No UI: this page just wires the REAL SDK onto window and provides a Node-bridged
+    // BlindRelay (put/list/get) so two isolated browser contexts share one relay.
+    import { FreeholdVault } from '../../packages/db/index.js';
+
+    const out = document.getElementById('out');
+    const log = (m) => { out.textContent += '\n' + m; };
+
+    // base64 <-> Uint8Array (transport across the page<->Node boundary via exposeFunction)
+    const b64enc = (u8) => {
+      let s = '';
+      const a = u8 instanceof Uint8Array ? u8 : new Uint8Array(u8);
+      for (let i = 0; i < a.length; i++) s += String.fromCharCode(a[i]);
+      return btoa(s);
+    };
+    const b64dec = (b64) => {
+      const s = atob(b64);
+      const a = new Uint8Array(s.length);
+      for (let i = 0; i < s.length; i++) a[i] = s.charCodeAt(i);
+      return a;
+    };
+
+    // Node-bridged relay: __relayPut/__relayList/__relayGet are installed by the test via
+    // page.exposeFunction and hold the SHARED in-memory log in Node (identical semantics to
+    // packages/db/relay-mem.js InMemoryRelay). Here we wrap them as a BlindRelay object.
+    //
+    // TEST-ONLY affordance: `pullBlocked` makes list() report 0 new blobs for the NEXT sync, so a
+    // device can PUSH its divergent edit (incrementing its own VV component) WITHOUT first pulling
+    // the peer's push. That is the only way to manufacture genuinely CONCURRENT version vectors
+    // (a fork) through sync()'s atomic pull-then-push loop — the real relay is untouched, we only
+    // hide new blobs from one device's pull for one call.
+    const relay = {
+      pullBlocked: false,
+      async put(syncId, sealed) {
+        return await window.__relayPut(b64enc(syncId), b64enc(sealed));
+      },
+      async list(syncId, since = 0) {
+        if (relay.pullBlocked) return 0;
+        return await window.__relayList(b64enc(syncId), since);
+      },
+      async get(syncId, seq) {
+        const b64 = await window.__relayGet(b64enc(syncId), seq);
+        return b64 == null ? null : b64dec(b64);
+      },
+    };
+
+    let vault = null;
+    const forks = [];  // {id, winner} captured by onFork for assertions
+
+    window.FH = {
+      async open() {
+        const wasmUrl = new URL('./pkg/freehold.js', location.href);
+        // Let the SDK spawn its OWN vault-worker.js via `new URL('./vault-worker.js', import.meta.url)`.
+        // That resolves relative to the SDK module's real (/@fs/) URL, which vite serves correctly —
+        // whereas a path built from location.href (server root) would not be servable.
+        vault = await FreeholdVault.open({ wasmUrl, rpName: 'freehold sync e2e' });
+        vault.onFork((f) => { forks.push(f); });
+        return true;
+      },
+      isSupported: () => FreeholdVault.isSupported(),
+      enroll: () => vault.enroll().then(() => true),
+      addRecoveryCode: (code) => vault.addRecoveryCode(code),
+      unlock: () => vault.unlock().then(() => true),
+      unlockWithRecovery: (code) => vault.unlockWithRecovery(code).then(() => true),
+      isUnlocked: () => vault.isUnlocked(),
+      sql: (q, params, db) => vault.sql(q, params, db),
+      exportBundleB64: async () => b64enc(await vault.exportBundle()),
+      importBundleB64: (b64) => vault.importBundle(b64dec(b64)).then(() => true),
+      sync: (opts = {}) => vault.sync({ relay, ...opts }),
+      // TEST-ONLY: push the current divergent state without pulling the peer first (see relay note).
+      syncPushNoPull: async () => {
+        relay.pullBlocked = true;
+        try { return await vault.sync({ relay }); }
+        finally { relay.pullBlocked = false; }
+      },
+      listForks: () => vault.listForks(),
+      openForkImageLen: async (id) => {
+        const f = await vault.openFork(id);
+        return f && f.image ? (f.image.byteLength ?? f.image.length ?? 0) : 0;
+      },
+      takenForks: () => forks.slice(),
+      lock: () => vault.lock().then(() => true),
+      close: () => { vault.close(); return true; },
+    };
+
+    log('FH installed on window');
+  </script>
+</body>
+</html>
