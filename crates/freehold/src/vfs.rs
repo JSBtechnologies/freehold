@@ -41,8 +41,21 @@ use zeroize::Zeroizing; // ENC: plaintext scratch buffers + retained DEK are zer
 use crate::crypto::{self, Crypto}; // ENC: the trusted crypto core
 use crate::manifest::{
     // ENC (M2): double-buffered manifest + TrustedGeneration anchor (§10, §17.C/D/E/J)
-    decode_anchor, encode_anchor, AnchorEntry, ManifestPayload, MANIFEST_HDR_LEN, MANIFEST_MAGIC,
+    decode_anchor, encode_anchor, AnchorEntry, ManifestPayload, ANCHOR_MAGIC, MANIFEST_HDR_LEN,
+    MANIFEST_MAGIC,
 };
+
+/// freehold-vfs-merkle-root H1: AAD for the anchor's AEAD, binding the anchor FORMAT MAGIC and SLOT.
+/// An old-format (ENCANCH1) blob or a blob relocated to the other slot fails authentication rather
+/// than silently decoding — closing the cross-version / slot-swap substitution paths. `seq` is not in
+/// the AAD (it is unknown before decrypt); it is already inside the AEAD-authenticated payload.
+fn anchor_aad(slot: usize) -> Vec<u8> {
+    let mut a = Vec::with_capacity(24 + 8 + 8);
+    a.extend_from_slice(b"freehold-anchor-aad-v2\0\0");
+    a.extend_from_slice(ANCHOR_MAGIC);
+    a.extend_from_slice(&(slot as u64).to_le_bytes());
+    a
+}
 
 use js_sys::{Array, DataView, IteratorNext, Reflect, Uint8Array};
 use wasm_bindgen::{JsCast, JsValue};
@@ -399,6 +412,11 @@ struct DbState {
     crypto: Rc<Crypto>,
     /// Current durable `db_generation` (the value in the last manifest slot written).
     generation: Cell<u64>,
+    /// freehold-vfs-merkle-root D-MR6: full-state root of the CURRENT committed generation (the one in
+    /// the last sealed manifest slot). On the next commit it is written as `prev_merkle_root`, giving
+    /// the bounded ±1 tolerance that absorbs the single journal-vs-manifest atomicity gap. `ZERO_ROOT`
+    /// until the DB has a committed root.
+    committed_root: Cell<[u8; 32]>,
 }
 
 struct OpfsSAHPool {
@@ -419,9 +437,10 @@ struct OpfsSAHPool {
     dek: Zeroizing<[u8; 32]>,
     // ENC: pool-domain subkey — files not attributable to a DB (temp) until/unless rebound.
     crypto: Rc<Crypto>,
-    // ENC (M2): subkey + AAD domain for the TrustedGeneration anchor file (§17.D).
+    // ENC (M2): subkey for the TrustedGeneration anchor file (§17.D). H1: the anchor now seals via
+    // `seal_bytes`/`open_bytes` with a version+slot AAD (`anchor_aad`), so no separate `anchor_fid` is
+    // needed — the AAD (not a file_id/block-device domain) carries the binding.
     anchor_crypto: Crypto,
-    anchor_fid: [u8; crypto::FILE_ID_LEN],
     anchor_handle: RefCell<Option<FileSystemSyncAccessHandle>>,
     // ENC (M2): manifest state per open main DB, keyed by the SQLite filename.
     dbs: RefCell<HashMap<String, Rc<DbState>>>,
@@ -501,7 +520,6 @@ impl OpfsSAHPool {
             dek: Zeroizing::new(*dek),                     // ENC (M2)
             crypto: Rc::new(Crypto::pool_key(dek)),        // ENC
             anchor_crypto: Crypto::anchor_key(dek),        // ENC (M2)
-            anchor_fid: crypto::file_id_for("#anchor#"),   // ENC (M2)
             anchor_handle: RefCell::new(None),             // ENC (M2)
             dbs: RefCell::new(HashMap::new()),             // ENC (M2)
             fault: Rc::new(FaultState::new()),             // ENC (M3)
@@ -923,14 +941,11 @@ impl OpfsSAHPool {
             if (n as usize) < crypto::PHYS_BLOCK {
                 continue;
             }
-            let mut plain = Zeroizing::new(vec![0u8; crypto::BLOCK_SIZE]);
-            if self
-                .anchor_crypto
-                .open_into(&self.anchor_fid, &crypto::NO_DOMAIN, slot as u64, &buf, &mut plain)
-                .is_err()
-            {
+            // H1: open with the version+slot-bound AAD. A pre-D-MR6 (ENCANCH1) blob or a slot-swapped
+            // blob fails here and is skipped (not silently decoded to attacker-chosen contents).
+            let Ok(plain) = self.anchor_crypto.open_bytes(&anchor_aad(slot), &buf) else {
                 continue;
-            }
+            };
             if let Some((seq, entries)) = decode_anchor(&plain) {
                 if best.as_ref().map_or(true, |(bs, _)| seq > *bs) {
                     best = Some((seq, entries));
@@ -951,10 +966,19 @@ impl OpfsSAHPool {
             .ok_or_else(|| OpfsSAHError::Generic("anchor handle unavailable".into()))?;
         let slot = (seq % 2) as usize;
         let plain = Zeroizing::new(encode_anchor(seq, entries));
-        let mut sealed = vec![0u8; crypto::PHYS_BLOCK];
-        self.anchor_crypto
-            .seal_into(&self.anchor_fid, &crypto::NO_DOMAIN, slot as u64, &plain, &mut sealed)
+        // H1 (review): seal with an AAD that BINDS the anchor format magic + slot, so an old-format
+        // (ENCANCH1) blob or a blob moved to the other slot FAILS AUTHENTICATION instead of silently
+        // decoding. The `seq` is already inside the AEAD-authenticated payload (unforgeable without the
+        // DEK). (Residual, §10.4: a genuinely-old validly-sealed blob replayed at its own slot, or a
+        // full two-slot wipe, still falls back — the anchor is a deletable local backstop; the strong
+        // un-wipeable anchor is the sync epoch. Documented in BUILD-NOTES.)
+        let sealed = self
+            .anchor_crypto
+            .seal_bytes(&anchor_aad(slot), &plain)
             .map_err(|e| OpfsSAHError::Generic(format!("anchor seal failed: {e:?}")))?;
+        if sealed.len() != crypto::PHYS_BLOCK {
+            return Err(OpfsSAHError::Generic("anchor sealed size mismatch".into()));
+        }
         let n = h
             .write_with_u8_array_and_options(
                 &sealed,
@@ -976,6 +1000,17 @@ impl OpfsSAHPool {
         committed: Option<u64>,
         in_flight: Option<u64>,
     ) -> Result<()> {
+        self.anchor_record_full(uuid, committed, in_flight, None)
+    }
+
+    /// Full anchor upsert including the D-MR6 strict `epoch_floor`. All values move forward only.
+    fn anchor_record_full(
+        &self,
+        uuid: &[u8; 16],
+        committed: Option<u64>,
+        in_flight: Option<u64>,
+        epoch_floor: Option<u64>,
+    ) -> Result<()> {
         let (seq, mut entries) = self.anchor_load();
         if let Some(i) = entries.iter().position(|e| &e.uuid == uuid) {
             let e = &mut entries[i];
@@ -984,6 +1019,9 @@ impl OpfsSAHPool {
             }
             if let Some(f) = in_flight {
                 e.in_flight = e.in_flight.max(f);
+            }
+            if let Some(ef) = epoch_floor {
+                e.epoch_floor = e.epoch_floor.max(ef);
             }
         } else {
             // security-review 1a: bound the table. With the create-ordering fix (manifest durable
@@ -1000,9 +1038,20 @@ impl OpfsSAHPool {
                 uuid: *uuid,
                 committed: committed.unwrap_or(0),
                 in_flight: in_flight.unwrap_or(0),
+                epoch_floor: epoch_floor.unwrap_or(0),
             });
         }
-        self.anchor_save(seq + 1, &entries)
+        // H1 (g.1): when raising a strict `epoch_floor`, persist it to BOTH double-buffer slots so a
+        // single-slot tamper/torn-write cannot drop back to a pre-epoch slot that lacks the floor.
+        // (Ordinary committed/in_flight bumps keep the single ping-pong write — their ±1 slack already
+        // tolerates one slot being one generation behind.) Epochs are rare, so the extra write is cheap.
+        if epoch_floor.is_some() {
+            self.anchor_save(seq + 1, &entries)?;
+            self.anchor_save(seq + 2, &entries)?;
+            Ok(())
+        } else {
+            self.anchor_save(seq + 1, &entries)
+        }
     }
 
     /// Seal + write the ping-pong manifest slot (`db_generation % 2`, §17.C) and flush it durable.
@@ -1100,6 +1149,10 @@ impl OpfsSAHPool {
         let payload = ManifestPayload {
             db_generation: 1,
             db_uuid: uuid,
+            // A brand-new DB has no durable blocks yet → zero root (D-MR2 legacy/not-yet sentinel);
+            // the first real commit's on_main_synced populates a real root.
+            merkle_root: crypto::ZERO_ROOT,
+            prev_merkle_root: crypto::ZERO_ROOT,
             files: vec![(crypto::file_id_for(name), 0)],
         };
         self.with_new_file(mname, SQLITE_OPEN_MAIN_DB, |mfile: &SyncAccessFile| -> Result<()> {
@@ -1113,7 +1166,12 @@ impl OpfsSAHPool {
         })??;
         // Manifest is durable; NOW record the anchor (committed=in_flight=1).
         self.anchor_record(&uuid, Some(1), Some(1))?;
-        let st = Rc::new(DbState { uuid, crypto: kdb, generation: Cell::new(1) });
+        let st = Rc::new(DbState {
+            uuid,
+            crypto: kdb,
+            generation: Cell::new(1),
+            committed_root: Cell::new(crypto::ZERO_ROOT),
+        });
         self.dbs.borrow_mut().insert(name.to_string(), st.clone());
         Ok(st)
     }
@@ -1180,12 +1238,21 @@ impl OpfsSAHPool {
 
         // §17.D freshness state machine: manifest one behind the trusted window is a lost final
         // bump from a normal crash (recoverable, re-adopt); anything older is rollback (refuse).
+        // D-MR6: the local `committed` high-water keeps its ±1 crash-atomicity slack, but the
+        // peer-attested `epoch_floor` is enforced STRICTLY (no slack) — an external attestation has no
+        // local crash gap, so any manifest below it is a definitive rollback.
         let gen = payload.db_generation;
         if let Some(e) = self.anchor_load().1.iter().find(|e| e.uuid == uuid) {
             if gen + 1 < e.committed {
                 return Err(OpfsSAHError::Generic(format!(
                     "ROLLBACK DETECTED: manifest db_generation {gen} is older than trusted generation {} — refusing to open",
                     e.committed
+                )));
+            }
+            if e.epoch_floor > 0 && gen < e.epoch_floor {
+                return Err(OpfsSAHError::Generic(format!(
+                    "ROLLBACK DETECTED: manifest db_generation {gen} is below the peer-attested epoch floor {} — refusing to open",
+                    e.epoch_floor
                 )));
             }
         }
@@ -1198,17 +1265,26 @@ impl OpfsSAHPool {
         main.is_main_db.set(true);
 
         let main_fid = crypto::file_id_for(name);
-        // ENC (M3, §14.8/§17.D): a nonzero rollback journal means a commit was interrupted — the
-        // main file may legitimately be mid-write (grown, or block 0 torn). The journal's
-        // pre-images are themselves AEAD-protected, and SQLite's replay restores + truncates the
-        // main file before any page is served. So with a hot journal present, DEFER the strict
-        // length/block-0 checks to post-replay state (they re-arm on the next journal-free open);
-        // refusing here would brick the DB on a normal power loss.
+        // ENC (M3, §14.8/§17.D): a HOT rollback journal means a commit was interrupted — the main
+        // file may legitimately be mid-write (grown, or block 0 torn). The journal's pre-images are
+        // AEAD-protected and SQLite's replay restores the main file before any page is served. So
+        // with a hot journal present, DEFER the strict length/block-0 checks (and the root check) to
+        // the post-replay state; refusing here would brick the DB on a normal power loss.
+        //
+        // freehold-vfs-merkle-root F1: "hot" MUST match SQLite's own definition — a journal with a
+        // VALID header (the 8-byte magic present in its decrypted block 0). A mere nonzero size is
+        // NOT enough: under `locking_mode=EXCLUSIVE` SQLite FINALIZES a journal by zeroing its header
+        // (not by deleting/truncating it), so a rolled-back journal PERSISTS on disk with its header
+        // cleared. Treating that persistent-but-dead journal as "hot" would defer the root check
+        // forever (a DB that ever crashed could never be root-verified again) — the very gap the
+        // reviewer flagged. Decrypting block 0 with `K_db` also authenticates the journal, so a
+        // planted/forged journal that fails AEAD is treated as NOT hot → the root check runs and
+        // catches any accompanying partial rollback. (Recovery itself never re-seals the manifest
+        // root in this VFS — `on_main_synced` does not fire on rollback — so a rollback can never be
+        // *laundered*; it is caught at this next journal-free open.)
         let hot_journal = {
             let jn = format!("{name}-journal");
-            files
-                .get(&jn)
-                .is_some_and(|j| j.phys_size().map(|s| s > 0).unwrap_or(false))
+            files.get(&jn).is_some_and(|j| self.journal_is_hot(j, &kdb, &uuid, &jn))
         };
         if main_phys > 0 && hot_journal {
             main.logical_size.set(Some((main_phys / crypto::PHYS_BLOCK) * crypto::BLOCK_SIZE));
@@ -1276,33 +1352,84 @@ impl OpfsSAHPool {
         }
         drop(files);
 
+        // freehold-vfs-merkle-root D-MR3: full-state root verification — a NEW fail-closed path
+        // alongside the anti-rollback refusal above. If the manifest carries a non-zero root
+        // (D-MR2: all-zero = legacy/not-yet-computed → skip), recompute over the ACTUAL main-DB
+        // blocks and refuse the DB if it disagrees. This detects PARTIAL rollback: an attacker
+        // restoring a subset of blocks to an older generation's ciphertext, which the per-block AEAD
+        // (binds position, not generation) and the manifest length check (whole-file only) do NOT
+        // catch.
+        //
+        // D-MR6: the seal now fires ONCE per commit at journal finalization (not at xSync), so the
+        // sealed manifest root always describes a durably-committed state and a hot journal rolls back
+        // to at most the immediately-previous committed root. The accepted set is therefore the two
+        // adjacent committed roots {merkle_root, prev_merkle_root} — a rollback of depth ≥2 matches
+        // NEITHER (refused on every open, re-plant-proof), while a depth-exactly-1 rollback to the
+        // genuine previous committed state matches prev (the irreducible 1-commit atomicity floor).
+        //
+        // Hot journal → the VFS OWNS the replay: reconstruct the exact image SQLite will serve and
+        // require its root ∈ accepted set BEFORE any page is served (provenance-independent). No hot
+        // journal → root the on-disk image and require ∈ accepted set.
+        if main_phys > 0 && payload.merkle_root != crypto::ZERO_ROOT {
+            let accepted = |r: &[u8; 32]| {
+                *r == payload.merkle_root
+                    || (payload.prev_merkle_root != crypto::ZERO_ROOT
+                        && *r == payload.prev_merkle_root)
+            };
+            if hot_journal {
+                let jname = format!("{name}-journal");
+                let served = self.replay_journal_root(name, &jname, &kdb, &uuid)?;
+                if !accepted(&served) {
+                    return Err(OpfsSAHError::Generic(format!(
+                        "PARTIAL ROLLBACK DETECTED: {name} rollback-journal replay produces an image \
+                         whose full-state root matches neither the sealed committed root nor the \
+                         previous root (planted/re-planted rollback ≥2 commits deep) — refusing to open"
+                    )));
+                }
+            } else {
+                let actual = self.full_state_root(name)?;
+                if !accepted(&actual) {
+                    return Err(OpfsSAHError::Generic(format!(
+                        "PARTIAL ROLLBACK DETECTED: full-state Merkle root mismatch for {name} \
+                         (some blocks restored to an older generation) — refusing to open"
+                    )));
+                }
+            }
+        }
+
         self.dbs.borrow_mut().insert(
             name.to_string(),
-            Rc::new(DbState { uuid, crypto: kdb, generation: Cell::new(gen) }),
+            Rc::new(DbState {
+                uuid,
+                crypto: kdb,
+                generation: Cell::new(gen),
+                committed_root: Cell::new(payload.merkle_root),
+            }),
         );
-        Ok(())
-    }
 
-    /// Bind a newly-opened journal/WAL to its owner DB's subkey (§17.E/H).
-    fn bind_satellite(&self, name: &str) -> Result<()> {
-        let Some(parent) = satellite_parent(name) else { return Ok(()) };
-        let Some(st) = self.dbs.borrow().get(parent).cloned() else { return Ok(()) };
-        let files = self.map_filename_to_file.borrow();
-        if let Some(f) = files.get(name) {
-            f.crypto.replace(st.crypto.clone());
-            f.key_domain.set(st.uuid); // security-review 3d: satellites share the DB's AAD domain
+        // F2: a durable DB carrying a legacy all-zero root is unverifiable indefinitely if it is
+        // never re-committed after upgrade (the anchor does not help — a zero-root manifest sits at
+        // the current committed generation). On the first WRITABLE, journal-free open of such a DB,
+        // proactively compute + seal a real root now (a migration commit at the same generation) so
+        // it is protected from the next open onward, instead of waiting for an organic write. (A
+        // read-only path that cannot seal would leave it skipped — documented in BUILD-NOTES; this
+        // VFS always opens read-write.)
+        if main_phys > 0 && !hot_journal && payload.merkle_root == crypto::ZERO_ROOT {
+            self.seal_root_migration(name)?;
         }
         Ok(())
     }
 
-    /// §17.D commit barrier, run after a main-DB xSync made its ciphertext durable:
-    /// record in_flight → seal+flush the ping-pong slot (with the §17.J length table) →
-    /// record committed → adopt the new generation.
-    fn on_main_synced(&self, name: &str) -> Result<()> {
+    /// F2 migration: seal a real full-state root for a durable legacy zero-root DB WITHOUT bumping
+    /// the freshness generation (this is not a data change — it only fills in the reserved root of
+    /// the already-current manifest slot). Idempotent: a subsequent open sees a non-zero root and
+    /// verifies normally.
+    fn seal_root_migration(&self, name: &str) -> Result<()> {
         let Some(st) = self.dbs.borrow().get(name).cloned() else { return Ok(()) };
-        let new_gen = st.generation.get() + 1;
-        self.anchor_record(&st.uuid, None, Some(new_gen))?;
-
+        let merkle_root = self.full_state_root(name)?;
+        if merkle_root == crypto::ZERO_ROOT {
+            return Ok(()); // no durable blocks — nothing to root yet
+        }
         let mname = manifest_name(name);
         let files = self.map_filename_to_file.borrow();
         let mut table: Vec<([u8; crypto::FILE_ID_LEN], u64)> = Vec::new();
@@ -1314,7 +1441,401 @@ impl OpfsSAHPool {
                 table.push((crypto::file_id_for(fname), l as u64));
             }
         }
-        let payload = ManifestPayload { db_generation: new_gen, db_uuid: st.uuid, files: table };
+        let gen = st.generation.get();
+        let payload = ManifestPayload {
+            db_generation: gen,
+            db_uuid: st.uuid,
+            merkle_root,
+            prev_merkle_root: crypto::ZERO_ROOT,
+            files: table,
+        };
+        let mfile = files
+            .get(&mname)
+            .ok_or_else(|| OpfsSAHError::Generic("manifest file missing at root migration".into()))?;
+        self.write_manifest_slot(mfile, &st.crypto, &mname, &payload)?;
+        drop(files);
+        st.committed_root.set(merkle_root);
+        Ok(())
+    }
+
+    /// Bind a newly-opened journal/WAL to its owner DB's subkey (§17.E/H).
+    ///
+    /// F3: `-wal` is REFUSED for any tracked (rooted) DB — WAL frames live OUTSIDE the full-state
+    /// root's scope (the root covers the main image only), so allowing WAL would reopen a rollback
+    /// gap. The VFS mandates journal=DELETE, so this path is not hit in practice; it fails closed
+    /// rather than silently rooting an unprotected WAL DB. The `-journal` shares the owner DB's AAD
+    /// domain (its `db_uuid`) as before (security-review 3d).
+    fn bind_satellite(&self, name: &str) -> Result<()> {
+        let Some(parent) = satellite_parent(name) else { return Ok(()) };
+        let Some(st) = self.dbs.borrow().get(parent).cloned() else { return Ok(()) };
+        if name.ends_with("-wal") {
+            return Err(OpfsSAHError::Generic(format!(
+                "refusing WAL satellite {name}: WAL frames are outside the full-state-root scope \
+                 (freehold-vfs-merkle-root F3) — this VFS requires journal=DELETE"
+            )));
+        }
+        let files = self.map_filename_to_file.borrow();
+        if let Some(f) = files.get(name) {
+            f.crypto.replace(st.crypto.clone());
+            f.key_domain.set(st.uuid); // security-review 3d: satellites share the DB's AAD domain
+        }
+        Ok(())
+    }
+
+    /// freehold-vfs-merkle-root D-MR6 shared commit barrier for a journal `jname` (of parent `parent`).
+    /// Called from EVERY finalization path — the EXCLUSIVE header-zeroing xWrite, xDelete, and
+    /// xTruncate-to-0. Seals the manifest (gen N+1) IFF the on-disk journal is genuinely HOT (valid
+    /// magic under the owner's real `K_db`). This is the ONE place all three paths converge, so:
+    ///   * #2 (no silent skip): if the journal IS hot but the parent DbState is absent, that is an
+    ///     invariant violation (a journal cannot be hot without its DB open) → hard `Err` (mapped to
+    ///     SQLITE_IOERR by the caller), NEVER a silent no-seal. Absent parent + no journal handle =
+    ///     genuinely nothing to finalize → Ok (no-op).
+    ///   * #3 (no double-fire): finalizing an ALREADY-dead journal (header zeroed by an earlier
+    ///     header-zero xWrite, then a redundant xDelete at connection close) is `journal_is_hot=false`
+    ///     → no seal, no generation inflation, no needless flush.
+    fn journal_finalize_barrier(&self, jname: &str, parent: &str) -> Result<()> {
+        // Resolve the parent's real subkey + uuid (never a bogus placeholder — #2).
+        let st = self.dbs.borrow().get(parent).cloned();
+        let hot = {
+            let files = self.map_filename_to_file.borrow();
+            match (files.get(jname), st.as_ref()) {
+                (Some(j), Some(st)) => self.journal_is_hot(j, &st.crypto, &st.uuid, jname),
+                (Some(j), None) => {
+                    // Journal file present but DB not open: we cannot authenticate it. If it is a
+                    // full-sized journal it may be hot — refuse to silently skip a possible commit
+                    // finalization. (In practice a finalization write always has the DB open.)
+                    let has_block0 =
+                        j.phys_size().map(|s| s >= crypto::PHYS_BLOCK).unwrap_or(false);
+                    if has_block0 {
+                        return Err(OpfsSAHError::Generic(format!(
+                            "journal {jname} finalized while its DB is not open — cannot authenticate, refusing (fail closed)"
+                        )));
+                    }
+                    false // no full header block → nothing to finalize
+                }
+                (None, _) => false, // no journal file at all → nothing to finalize
+            }
+        };
+        if hot {
+            self.on_main_synced(parent)?;
+        }
+        Ok(())
+    }
+
+    /// freehold-vfs-merkle-root F1: is this rollback journal genuinely HOT (needs replay), matching
+    /// SQLite's own test? Decrypt journal block 0 with the owner DB's `K_db`+domain and check for the
+    /// 8-byte journal magic. Returns false if the block is absent, fails AEAD (planted/forged), or
+    /// carries no magic (a finalized/rolled-back journal whose header SQLite has zeroed). A false
+    /// result means the open-path strict checks + root verification run normally.
+    fn journal_is_hot(
+        &self,
+        j: &SyncAccessFile,
+        kdb: &Crypto,
+        uuid: &[u8; 16],
+        jname: &str,
+    ) -> bool {
+        // SQLite rollback-journal header magic (see sqlite3 os.c `aJournalMagic`).
+        const JOURNAL_MAGIC: [u8; 8] = [0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7];
+        let phys = match j.phys_size() {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        if phys < crypto::PHYS_BLOCK {
+            return false; // no full block 0 → cannot be a valid hot journal
+        }
+        let mut sealed = vec![0u8; crypto::PHYS_BLOCK];
+        match j.phys_read(&mut sealed, 0) {
+            Ok(n) if n >= crypto::PHYS_BLOCK => {}
+            _ => return false,
+        }
+        let fid = crypto::file_id_for(jname);
+        let mut plain = Zeroizing::new(vec![0u8; crypto::BLOCK_SIZE]);
+        // Journals share the owner DB's uuid domain (security-review 3d). A block that fails AEAD is
+        // a planted/tampered/foreign journal → treat as NOT hot (fail closed: the root check runs).
+        if kdb.open_into(&fid, uuid, 0, &sealed, &mut plain).is_err() {
+            return false;
+        }
+        plain.starts_with(&JOURNAL_MAGIC)
+    }
+
+    /// Decrypt the whole of a file into a contiguous plaintext byte stream (one `B`-byte block at a
+    /// time, each AEAD-authenticated). Used to parse the rollback journal, whose page records straddle
+    /// our fixed encryption-block grid. Every present block MUST authenticate — a failure is a hard
+    /// error (tamper), never silently skipped (§17.K). A torn final block truncates the stream (the
+    /// journal content past it was never durable).
+    fn decrypt_whole_file(
+        &self,
+        f: &SyncAccessFile,
+        crypto: &Crypto,
+        domain: &[u8; crypto::KEY_DOMAIN_LEN],
+        fid: &[u8; crypto::FILE_ID_LEN],
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        let phys = f
+            .phys_size()
+            .map_err(|e| OpfsSAHError::Generic(format!("{e:?}")))?;
+        let p = crypto::PHYS_BLOCK;
+        let b = crypto::BLOCK_SIZE;
+        let nblocks = phys / p;
+        let mut out = Zeroizing::new(vec![0u8; nblocks * b]);
+        let mut sealed = vec![0u8; p];
+        for k in 0..nblocks {
+            let n = f
+                .phys_read(&mut sealed, k * p)
+                .map_err(|e| OpfsSAHError::Generic(format!("journal read blk {k}: {e:?}")))?;
+            if n < p {
+                out.truncate(k * b);
+                break;
+            }
+            crypto
+                .open_into(fid, domain, k as u64, &sealed, &mut out[k * b..k * b + b])
+                .map_err(|_| {
+                    OpfsSAHError::Generic(format!("journal blk {k} failed AEAD auth (tamper?)"))
+                })?;
+        }
+        Ok(out)
+    }
+
+    /// freehold-vfs-merkle-root D-MR5/D-MR6 (option b): VFS-OWNED rollback-journal replay. Parse the
+    /// AEAD-authenticated rollback journal, apply its pre-image pages to a SHADOW copy of the current
+    /// main image, truncate to the journal's recorded initial page count, and return the full-state
+    /// root of that shadow — the EXACT image SQLite will serve after replaying THIS journal. The caller
+    /// requires the returned root to lie in the accepted set {merkle_root, prev_merkle_root}. Because
+    /// the check is over the replayed image (provenance-independent), re-planting a hot journal before
+    /// every open cannot suppress detection.
+    ///
+    /// Journal format (sqlite fileformat2 §rollback journal): header in sector 0
+    /// `magic(8) nRec_be(4) nonce_be(4) initPages_be(4) sector_be(4) pageSize_be(4)`, padded to the
+    /// sector size; then page records at each following sector boundary, `pgno_be(4) data(pageSize)
+    /// cksum_be(4)`. Records are consumed until one fails its checksum (SQLite's SQLITE_DONE = normal
+    /// end, i.e. a torn final record from a real power loss), a zero pgno is seen, or the stream is
+    /// exhausted. `nRec==0`/`0xffffffff` ⇒ derive from remaining size (SQLite's hot-journal behavior).
+    fn replay_journal_root(
+        &self,
+        name: &str,
+        jname: &str,
+        kdb: &Crypto,
+        uuid: &[u8; 16],
+    ) -> Result<[u8; 32]> {
+        const JOURNAL_MAGIC: [u8; 8] = [0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7];
+        let b = crypto::BLOCK_SIZE;
+        let (jbytes, mut shadow) = {
+            let files = self.map_filename_to_file.borrow();
+            let jf = files
+                .get(jname)
+                .ok_or_else(|| OpfsSAHError::Generic(format!("{jname} vanished before replay")))?;
+            let mf = files
+                .get(name)
+                .ok_or_else(|| OpfsSAHError::Generic(format!("{name} vanished before replay")))?;
+            let jbytes = self.decrypt_whole_file(jf, kdb, uuid, &crypto::file_id_for(jname))?;
+            let main_plain =
+                self.decrypt_whole_file(mf, kdb, uuid, &crypto::file_id_for(name))?;
+            let shadow: Vec<[u8; crypto::BLOCK_SIZE]> = main_plain
+                .chunks_exact(b)
+                .map(|c| {
+                    let mut a = [0u8; crypto::BLOCK_SIZE];
+                    a.copy_from_slice(c);
+                    a
+                })
+                .collect();
+            (jbytes, shadow)
+        };
+
+        if jbytes.len() < 28 || jbytes[0..8] != JOURNAL_MAGIC {
+            return Err(OpfsSAHError::Generic(
+                "hot journal has no valid header at replay time".into(),
+            ));
+        }
+        let be32 = |o: usize| -> u32 {
+            u32::from_be_bytes([jbytes[o], jbytes[o + 1], jbytes[o + 2], jbytes[o + 3]])
+        };
+        // First-header framing (all segments share pageSize + sectorSize; the FIRST header's
+        // initPages is the committed length the whole rollback restores — SQLite truncates to it).
+        let page_size = be32(24) as usize;
+        let sector = be32(20) as usize;
+        let init_pages = be32(16) as usize;
+        if page_size != b {
+            return Err(OpfsSAHError::Generic(format!(
+                "hot journal page_size {page_size} != B={b} — refusing (§17.I)"
+            )));
+        }
+        if sector == 0 || sector % b != 0 {
+            return Err(OpfsSAHError::Generic(format!(
+                "hot journal sector size {sector} not a positive multiple of B={b}"
+            )));
+        }
+        let rec_sz = page_size + 8;
+        // #4 (review + verified against SQLite pager.c): within ONE journal-header segment, page
+        // records are packed CONTIGUOUSLY at stride pageSize+8, first record at the sector-padded
+        // header end. SQLite writes a SECOND sector-aligned header when a large transaction spills the
+        // page cache mid-write (pagerStress → syncJournal(newHdr=1)) or on a savepoint. We therefore
+        // LOOP over segments: parse a header, consume its records (nRec, or size-derived when nRec is
+        // 0/0xffffffff), then round up to the next sector boundary and, if another valid magic is
+        // present, continue — exactly SQLite's pager_playback / readJournalHdr(journalHdrOffset) loop.
+        // Each page is journaled at most once per transaction (pInJournal bitvec), so applying every
+        // valid record across all segments reconstructs the committed image regardless of order.
+        // L1: bound the max page number before `shadow.resize` so a hostile pgno can't OOM.
+        let max_pages: usize = init_pages
+            .max(shadow.len())
+            .max(jbytes.len() / rec_sz)
+            .saturating_add(8);
+
+        let mut seg_off = 0usize; // offset of the current segment's header
+        'segments: loop {
+            if seg_off + 28 > jbytes.len() || jbytes[seg_off..seg_off + 8] != JOURNAL_MAGIC {
+                break; // no further valid header → end of journal (SQLite SQLITE_DONE)
+            }
+            let hdr = |o: usize| -> u32 {
+                let a = seg_off + o;
+                u32::from_be_bytes([jbytes[a], jbytes[a + 1], jbytes[a + 2], jbytes[a + 3]])
+            };
+            let nrec_hdr = hdr(8);
+            let nonce = hdr(12);
+            let seg_sector = hdr(20) as usize;
+            let seg_page = hdr(24) as usize;
+            if seg_page != page_size || seg_sector != sector {
+                break; // segments must share framing (SQLite invariant) — anything else = end.
+            }
+            let cap: u64 = if nrec_hdr == 0 || nrec_hdr == 0xffff_ffff {
+                u64::MAX
+            } else {
+                nrec_hdr as u64
+            };
+            // Records start at the sector boundary after this segment's header.
+            let mut off = seg_off + sector;
+            let mut applied_seg: u64 = 0;
+            while applied_seg < cap && off + rec_sz <= jbytes.len() {
+                let pgno = u32::from_be_bytes([
+                    jbytes[off],
+                    jbytes[off + 1],
+                    jbytes[off + 2],
+                    jbytes[off + 3],
+                ]) as usize;
+                let data = &jbytes[off + 4..off + 4 + page_size];
+                let stored_cksum = u32::from_be_bytes([
+                    jbytes[off + 4 + page_size],
+                    jbytes[off + 5 + page_size],
+                    jbytes[off + 6 + page_size],
+                    jbytes[off + 7 + page_size],
+                ]);
+                // pager_cksum: cksum = nonce; i = pageSize-200; while i>0 { cksum += data[i]; i -= 200 }
+                let mut cksum = nonce;
+                let mut i: isize = page_size as isize - 200;
+                while i > 0 {
+                    cksum = cksum.wrapping_add(data[i as usize] as u32);
+                    i -= 200;
+                }
+                if cksum != stored_cksum {
+                    break 'segments; // torn/invalid record → normal end (SQLITE_DONE)
+                }
+                if pgno == 0 || pgno > max_pages {
+                    break 'segments; // zero-marker or out-of-bound pgno → stop (safe end)
+                }
+                let idx = pgno - 1;
+                if idx >= shadow.len() {
+                    shadow.resize(idx + 1, [0u8; crypto::BLOCK_SIZE]);
+                }
+                shadow[idx].copy_from_slice(data);
+                applied_seg += 1;
+                off += rec_sz;
+            }
+            // Advance to the next sector-aligned header (round `off` up to a sector multiple).
+            let next = off.div_ceil(sector) * sector;
+            if next <= seg_off {
+                break; // no forward progress → stop (defensive)
+            }
+            seg_off = next;
+        }
+
+        // Truncate to the FIRST header's initial DB size (the committed length the rollback restores).
+        if init_pages > 0 && init_pages < shadow.len() {
+            shadow.truncate(init_pages);
+        }
+        let mut root = crypto::FullStateRoot::new();
+        for (k, page) in shadow.iter().enumerate() {
+            root.update_block(k as u64, page);
+        }
+        Ok(root.finish())
+    }
+
+    /// Compute the full-state Merkle root over `name`'s **plaintext** main-DB blocks in index order
+    /// (freehold-vfs-merkle-root D-MR1). Deterministic, layout-independent, stable across devices for
+    /// identical logical state. Scope = the main DB file only: in rollback-journal mode it is the
+    /// single authoritative committed image (satellites are transient journal state, not part of the
+    /// durable snapshot). The DB's `K_db`/domain must already be bound to the handle (post-open).
+    ///
+    /// Reads exactly `logical_len / B` whole blocks. Any physically-present block that fails AEAD is a
+    /// hard error (never silently skipped) — the same tamper stance as the read path (§17.K).
+    fn full_state_root(&self, name: &str) -> Result<[u8; 32]> {
+        let files = self.map_filename_to_file.borrow();
+        let f = files
+            .get(name)
+            .ok_or_else(|| OpfsSAHError::Generic(format!("{name} not in pool for root")))?;
+        let logical = f
+            .ensure_logical()
+            .map_err(|e| OpfsSAHError::Generic(format!("{e:?}")))?;
+        let file_id = f.file_id.get();
+        let domain = f.key_domain.get();
+        let crypto = f.crypto.borrow();
+        let b = crypto::BLOCK_SIZE;
+        let p = crypto::PHYS_BLOCK;
+        // Whole-block count of the logical image (main DB is always whole-block, §17.I).
+        let blocks = logical / b;
+        let mut root = crypto::FullStateRoot::new();
+        let mut physbuf = vec![0u8; p];
+        let mut plain = Zeroizing::new(vec![0u8; b]);
+        for k in 0..blocks as u64 {
+            let phys_at = (k as usize) * p;
+            let n = f
+                .phys_read(&mut physbuf, phys_at)
+                .map_err(|e| OpfsSAHError::Generic(format!("root phys_read blk {k}: {e:?}")))?;
+            if n < p {
+                return Err(OpfsSAHError::Generic(format!(
+                    "root: block {k} short/torn ({n}<{p}) while computing full-state root"
+                )));
+            }
+            crypto
+                .open_into(&file_id, &domain, k, &physbuf, &mut plain)
+                .map_err(|_| {
+                    OpfsSAHError::Generic(format!(
+                        "root: block {k} failed AEAD authentication (tamper?) while computing full-state root"
+                    ))
+                })?;
+            root.update_block(k, &plain);
+        }
+        Ok(root.finish())
+    }
+
+    /// §17.D commit barrier, run after a main-DB xSync made its ciphertext durable:
+    /// record in_flight → seal+flush the ping-pong slot (with the §17.J length table) →
+    /// record committed → adopt the new generation.
+    fn on_main_synced(&self, name: &str) -> Result<()> {
+        let Some(st) = self.dbs.borrow().get(name).cloned() else { return Ok(()) };
+        let new_gen = st.generation.get() + 1;
+        self.anchor_record(&st.uuid, None, Some(new_gen))?;
+
+        let mname = manifest_name(name);
+        // freehold-vfs-merkle-root D-MR1: recompute the full-state root over the now-durable main-DB
+        // plaintext blocks and seal it INSIDE the manifest payload. Computed here (before the `files`
+        // borrow below) because `full_state_root` borrows the file map itself.
+        let merkle_root = self.full_state_root(name)?;
+        let files = self.map_filename_to_file.borrow();
+        let mut table: Vec<([u8; crypto::FILE_ID_LEN], u64)> = Vec::new();
+        for (fname, f) in files.iter() {
+            if fname == name || satellite_parent(fname) == Some(name) {
+                let l = f
+                    .ensure_logical()
+                    .map_err(|e| OpfsSAHError::Generic(format!("{e:?}")))?;
+                table.push((crypto::file_id_for(fname), l as u64));
+            }
+        }
+        // D-MR6: carry the current committed root as `prev_merkle_root` (the bounded ±1 tolerance).
+        let payload = ManifestPayload {
+            db_generation: new_gen,
+            db_uuid: st.uuid,
+            merkle_root,
+            prev_merkle_root: st.committed_root.get(),
+            files: table,
+        };
         let mfile = files
             .get(&mname)
             .ok_or_else(|| OpfsSAHError::Generic("manifest file missing at commit".into()))?;
@@ -1323,6 +1844,7 @@ impl OpfsSAHPool {
 
         self.anchor_record(&st.uuid, Some(new_gen), Some(new_gen))?;
         st.generation.set(new_gen);
+        st.committed_root.set(merkle_root); // becomes `prev` on the next commit
         Ok(())
     }
 
@@ -1369,6 +1891,38 @@ impl OpfsSAHPool {
     fn active_anchor_slot(&self) -> usize {
         let (seq, _) = self.anchor_load();
         (seq % 2) as usize
+    }
+
+    // ENC (H1 test-rig): snapshot the raw on-disk anchor bytes (both slots) — an attacker with OPFS
+    // write access captures these to replay later. Returns the whole anchor file.
+    fn export_anchor_raw(&self) -> Result<Vec<u8>> {
+        let h = self.anchor_handle.borrow();
+        let h = h
+            .as_ref()
+            .ok_or_else(|| OpfsSAHError::Generic("anchor handle unavailable".into()))?;
+        let size = h.get_size().map(|s| s as usize).unwrap_or(0);
+        let mut buf = vec![0u8; size];
+        if size > 0 {
+            h.read_with_u8_array_and_options(&mut buf, &read_write_options(0.0))
+                .map_err(OpfsSAHError::Read)?;
+        }
+        Ok(buf)
+    }
+
+    // ENC (H1 test-rig): overwrite the raw on-disk anchor with captured bytes — simulates an attacker
+    // restoring an OLD (or old-format) anchor blob to downgrade the freshness high-water / epoch floor.
+    fn import_anchor_raw(&self, bytes: &[u8]) -> Result<()> {
+        let h = self.anchor_handle.borrow();
+        let h = h
+            .as_ref()
+            .ok_or_else(|| OpfsSAHError::Generic("anchor handle unavailable".into()))?;
+        h.truncate_with_f64(bytes.len() as f64).map_err(OpfsSAHError::Truncate)?;
+        if !bytes.is_empty() {
+            h.write_with_u8_array_and_options(bytes, &read_write_options(0.0))
+                .map_err(OpfsSAHError::Write)?;
+        }
+        h.flush().map_err(OpfsSAHError::Flush)?;
+        Ok(())
     }
 
     // ============ ENC (sync-epoch): peer-attested freshness (sync-epoch-design §4/§5) =============
@@ -1421,7 +1975,9 @@ impl OpfsSAHPool {
         let mut uuid = [0u8; 16];
         uuid.copy_from_slice(&plain[..16]);
         let gen = u64::from_le_bytes(plain[16..24].try_into().unwrap());
-        self.anchor_record(&uuid, Some(gen), Some(gen))?;
+        // D-MR6: a peer epoch is a STRICT external freshness floor (no local ±1 crash slack). Raise
+        // both the crash-tolerant `committed` high-water AND the strict `epoch_floor`.
+        self.anchor_record_full(&uuid, Some(gen), Some(gen), Some(gen))?;
         Ok(gen)
     }
 
@@ -1614,19 +2170,20 @@ impl VfsStore<SyncAccessFile, SyncAccessHandleAppData> for SyncAccessHandleStore
 
     fn delete_file(vfs: *mut sqlite3_vfs, file: &str) -> VfsResult<()> {
         let pool = unsafe { Self::app_data(vfs) };
-        pool.delete_file(file)
-            .map_err(|err| err.vfs_err(SQLITE_IOERR_DELETE))?;
-        // ENC (M3, §17.D): in rollback-journal mode, deleting the journal IS the commit/rollback
-        // finalization point — the data state just became canonical. Refresh the manifest here so
-        // it can never describe a state the journal subsequently rolled back (crash between
-        // manifest write and journal delete would otherwise leave a manifest one txn ahead of the
-        // recovered data, bricking the next strict open).
+        // freehold-vfs-merkle-root D-MR6: deleting the journal is a commit-finalization point. SEAL
+        // the manifest (gen N+1, prev = R_N) BEFORE the journal delete becomes durable, so no crash
+        // can leave a committed image with a manifest ≥2 behind (see D-MR6 design note crash table).
+        // #3: the barrier only fires if the journal is ACTUALLY HOT — deleting an already-finalized
+        // (header-zeroed) journal at connection close is a no-op (no gen inflation, no extra flush).
         if file.ends_with("-journal") {
             if let Some(parent) = satellite_parent(file) {
-                pool.on_main_synced(parent)
+                let parent = parent.to_string();
+                pool.journal_finalize_barrier(file, &parent)
                     .map_err(|err| err.vfs_err(SQLITE_IOERR))?;
             }
         }
+        pool.delete_file(file)
+            .map_err(|err| err.vfs_err(SQLITE_IOERR_DELETE))?;
         Ok(())
     }
 
@@ -1678,6 +2235,50 @@ impl SQLiteIoMethods for SyncAccessHandleIoMethods {
         SQLITE_IOCAP_UNDELETABLE_WHEN_OPEN
     }
 
+    // freehold-vfs-merkle-root D-MR6: in `locking_mode=EXCLUSIVE` SQLite does NOT delete or truncate
+    // the journal at commit — it INVALIDATES it by zeroing its header (a write to journal offset 0
+    // that clears the magic). That header-zeroing write is the TRUE commit finalization point, so it
+    // is a commit barrier: SEAL the manifest (gen N+1) BEFORE the zeroing write becomes durable, then
+    // perform the write. A write to offset 0 that SETS the magic (transaction start) is NOT a barrier.
+    unsafe extern "C" fn xWrite(
+        pFile: *mut sqlite3_file,
+        zBuf: *const ::std::os::raw::c_void,
+        iAmt: ::std::os::raw::c_int,
+        iOfst: rsqlite_vfs::ffi::sqlite3_int64,
+    ) -> ::std::os::raw::c_int {
+        const JOURNAL_MAGIC: [u8; 8] = [0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7];
+        let vfs_file = SQLiteVfsFile::from_file(pFile);
+        let app_data = SyncAccessHandleStore::app_data(vfs_file.vfs);
+        let offset = iOfst as usize;
+        let size = iAmt as usize;
+        let slice = core::slice::from_raw_parts(zBuf.cast::<u8>(), size);
+
+        // Commit finalization: a write to a journal's header (offset 0) that does NOT carry the magic
+        // invalidates a previously-hot journal. Seal BEFORE the write lands (via the shared barrier,
+        // which #2: hard-errors rather than silently skips if the journal is present-but-unauthable,
+        // and #3: no-ops on an already-dead journal so no double-fire / gen inflation).
+        if offset == 0 && size >= 8 && !slice.starts_with(&JOURNAL_MAGIC) {
+            let name = vfs_file.name();
+            if name.ends_with("-journal") {
+                if let Some(parent) = satellite_parent(name) {
+                    let parent = parent.to_string();
+                    if let Err(err) = app_data.journal_finalize_barrier(name, &parent) {
+                        return app_data.store_err(err.vfs_err(SQLITE_IOERR));
+                    }
+                }
+            }
+        }
+
+        let f = |file: &mut SyncAccessFile| {
+            file.write(slice, offset)?;
+            Ok(SQLITE_OK)
+        };
+        match SyncAccessHandleStore::with_file_mut(vfs_file, f) {
+            Ok(code) => code,
+            Err(err) => app_data.store_err(err),
+        }
+    }
+
     unsafe extern "C" fn xClose(pFile: *mut sqlite3_file) -> ::std::os::raw::c_int {
         let vfs_file = SQLiteVfsFile::from_file(pFile);
         let file = vfs_file.name().to_string();
@@ -1690,40 +2291,47 @@ impl SQLiteIoMethods for SyncAccessHandleIoMethods {
         ret
     }
 
-    // ENC (M3, §17.D): mirror of the xDelete journal hook for `locking_mode=EXCLUSIVE`, where
-    // SQLite truncates the journal to zero instead of deleting it at commit end. A successful
-    // journal reset finalizes the transaction → refresh the manifest to the canonical state.
+    // ENC (M3, §17.D): mirror of the xDelete journal hook for `locking_mode=EXCLUSIVE`, where SQLite
+    // truncates the journal to zero (un-hotting it) instead of deleting it at commit end. D-MR6: SEAL
+    // the manifest (gen N+1) BEFORE the truncate-to-0 becomes durable — same ordering rationale as
+    // xDelete (a committed image must never be left with a manifest ≥2 behind). A non-zero truncate
+    // (mid-transaction journal reset) is data-only, no barrier.
     unsafe extern "C" fn xTruncate(
         pFile: *mut sqlite3_file,
         size: rsqlite_vfs::ffi::sqlite3_int64,
     ) -> ::std::os::raw::c_int {
         let vfs_file = SQLiteVfsFile::from_file(pFile);
         let app_data = SyncAccessHandleStore::app_data(vfs_file.vfs);
-        let f = |file: &mut SyncAccessFile| {
-            file.truncate(size as usize)?;
-            Ok(SQLITE_OK)
-        };
-        let code = match SyncAccessHandleStore::with_file_mut(vfs_file, f) {
-            Ok(code) => code,
-            Err(err) => return app_data.store_err(err),
-        };
-        if code == SQLITE_OK && size == 0 {
+        // Seal FIRST (only for a journal truncate-to-0 = commit finalization). #3: the shared barrier
+        // no-ops if the journal is already dead (not hot), so truncating an already-header-zeroed
+        // journal never double-fires the generation bump.
+        if size == 0 {
             let name = vfs_file.name();
             if name.ends_with("-journal") {
                 if let Some(parent) = satellite_parent(name) {
-                    if let Err(err) = app_data.on_main_synced(parent) {
+                    let parent = parent.to_string();
+                    if let Err(err) = app_data.journal_finalize_barrier(name, &parent) {
                         return app_data.store_err(err.vfs_err(SQLITE_IOERR));
                     }
                 }
             }
         }
-        code
+        let f = |file: &mut SyncAccessFile| {
+            file.truncate(size as usize)?;
+            Ok(SQLITE_OK)
+        };
+        match SyncAccessHandleStore::with_file_mut(vfs_file, f) {
+            Ok(code) => code,
+            Err(err) => app_data.store_err(err),
+        }
     }
 
-    // ENC (M2, §17.D): xSync is the durability barrier. After the data flush, a main-DB sync also
-    // bumps `db_generation`, writes+flushes the ping-pong manifest slot, and records the anchor —
-    // in exactly that order (data durable → manifest durable → anchor), so a crash at any point
-    // leaves an openable state. Satellite syncs flush data only.
+    // ENC (M2, §17.D): xSync flushes data durable. freehold-vfs-merkle-root D-MR6: xSync is NO LONGER
+    // a commit barrier — a main-DB xSync flushes durably but does NOT bump the generation or seal the
+    // manifest. The barrier now fires ONLY at journal finalization (the true commit point), so the
+    // sealed manifest root always describes a durably-committed state rather than a synced-but-still-
+    // rollbackable one. (Previously xSync also sealed, letting the manifest run ahead of a hot
+    // journal's rollback target — the F1-a root cause.)
     unsafe extern "C" fn xSync(
         pFile: *mut sqlite3_file,
         _flags: ::std::os::raw::c_int,
@@ -1735,22 +2343,10 @@ impl SQLiteIoMethods for SyncAccessHandleIoMethods {
             file.flush()?;
             Ok(SQLITE_OK)
         };
-        let code = match SyncAccessHandleStore::with_file_mut(vfs_file, f) {
+        match SyncAccessHandleStore::with_file_mut(vfs_file, f) {
             Ok(code) => code,
-            Err(err) => return app_data.store_err(err),
-        };
-        if code != SQLITE_OK {
-            return code;
+            Err(err) => app_data.store_err(err),
         }
-        // security-review 1.3: only a MAIN-DB sync is a commit barrier. `on_main_synced` already
-        // no-ops for non-main names (they are absent from `dbs`), but gate on the open flag too so
-        // the invariant is explicit and a journal sync can never trigger a generation bump.
-        if vfs_file.flags & SQLITE_OPEN_MAIN_DB != 0 {
-            if let Err(err) = app_data.on_main_synced(vfs_file.name()) {
-                return app_data.store_err(err.vfs_err(SQLITE_IOERR));
-            }
-        }
-        SQLITE_OK
     }
 }
 
@@ -1962,6 +2558,7 @@ impl OpfsSAHPoolUtil {
         self.pool.manifest_generation(db)
     }
 
+
     /// ENC (M3, §14.8): arm the fault injector — the next `n` persistence ops land, then power dies.
     #[cfg(feature = "testing-api")]
     pub fn arm_fault(&self, n: u32) {
@@ -1992,6 +2589,16 @@ impl OpfsSAHPoolUtil {
         self.pool.active_anchor_slot()
     }
 
+    /// ENC (H1 test-rig): snapshot / restore the raw on-disk anchor bytes (attacker replay).
+    #[cfg(feature = "testing-api")]
+    pub fn export_anchor_raw(&self) -> Result<Vec<u8>> {
+        self.pool.export_anchor_raw()
+    }
+    #[cfg(feature = "testing-api")]
+    pub fn import_anchor_raw(&self, bytes: &[u8]) -> Result<()> {
+        self.pool.import_anchor_raw(bytes)
+    }
+
     /// ENC (M3 cross-device): export a DB's encrypted image (main + manifest) as a `name|hex` bundle.
     /// The DEK is NOT included — the bytes are opaque ciphertext (server-blind sync primitive).
     pub fn export_bundle(&self, db_name: &str) -> Result<String> {
@@ -2014,6 +2621,17 @@ impl OpfsSAHPoolUtil {
     /// mark so a subsequent rollback below it is refused at open. Requires the REAL DEK.
     pub fn apply_epoch(&self, token: &[u8]) -> Result<u64> {
         self.pool.apply_epoch(token)
+    }
+
+    /// ENC (freehold-vfs-merkle-root D-MR1/D-MR5): the full-state Merkle root over the named main
+    /// DB's current plaintext blocks. Exposed for block-delta (D-BD9), which uses it as the
+    /// authenticated **base fingerprint** (refuse a delta onto a divergent same-generation base) and
+    /// the **result check** (recompute after applying a delta, require it == the sealed root before
+    /// the atomic swap). Deterministic + stable across devices for identical logical state. The DB
+    /// must be open (its `K_db` bound to the handle); returns the same value now sealed in its
+    /// manifest at the last commit.
+    pub fn full_state_root(&self, db_name: &str) -> Result<[u8; 32]> {
+        self.pool.full_state_root(db_name)
     }
 
     /// ENC (freehold-sync-design §4): the opaque per-DB relay bucket id for this pool's DEK. 16 bytes;

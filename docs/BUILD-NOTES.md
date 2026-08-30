@@ -117,8 +117,90 @@ anchor ("anchor.bin" beside .opaque/): DOUBLE-BUFFERED (security-review C2) — 
   acceptance of *known-old* state, but a wiped anchor + old image is indistinguishable from a first
   run). The strong anchor is the sync epoch — lands with the sync milestone. Also, **exactly one
   generation of rollback is tolerated by design** (§17.D crash recovery).
-- **Partial/surgical rollback (Merkle-over-tags)** — deferred per D4; `merkle_root` reserved 0.
-  An attacker pairing the current manifest with older individual data blocks is not detected.
+- **Partial/surgical rollback (full-state Merkle root) — NOW IMPLEMENTED** (freehold-vfs-merkle-root
+  D-MR1..D-MR5). The manifest's reserved `merkle_root` (bytes 32..64) now holds a full-state root =
+  SHA-256 hash-of-hashes over the main DB's plaintext blocks (index-ordered; `crypto::FullStateRoot`).
+  It is recomputed + sealed on every commit and verified at open; a mismatch REFUSES the DB
+  ("PARTIAL ROLLBACK DETECTED"), closing the reserved-0 gap above. Hash choice: SHA-256 (reused from
+  the existing `sha2` dep — a hash, not a cipher; no new crypto primitive). Boundaries:
+  - **Legacy zero-root (D-MR2):** an all-zero root = pre-Merkle image → verification skipped and a
+    real root is sealed on the next commit; additionally, a durable zero-root DB self-populates a
+    root on its first writable, journal-free open (F2 migration) so it does not stay unverified.
+  - **Hot-journal handling — F1-a CLOSED via D-MR6 (commit-barrier fix + VFS-owned replay).**
+    - **"Hot" = valid decrypted journal magic** (matches SQLite's own test), NOT nonzero size (under
+      EXCLUSIVE mode a finalized journal persists with a zeroed header). A journal that fails AEAD
+      (forged/planted-foreign) is not hot → the on-disk root check runs immediately.
+    - **Commit barrier moved to TRUE commit (D-MR6).** The generation bump + manifest seal fired at
+      BOTH main-DB xSync AND journal finalization; the xSync firing sealed a synced-but-not-yet-
+      committed state, so the manifest could run *several generations ahead* of a hot journal's
+      rollback target (no bounded root reference could then verify a legit replay — the earlier
+      blocker). Now the barrier fires ONLY at journal finalization, which in this VFS is: xDelete of
+      `<db>-journal`, xTruncate-to-0, OR (the common EXCLUSIVE-mode case) a **header-zeroing write**
+      to journal offset 0 that clears the magic. The seal happens BEFORE the finalizing op becomes
+      durable, so a committed image is never left with a manifest ≥2 behind. The sealed root now
+      advances **once per commit** and always describes a durably-committed state.
+    - **VFS-owned rollback-journal replay at open.** With a hot journal present the VFS parses the
+      AEAD-authenticated journal (header magic/nRec/nonce/initPages/sector/pageSize; per-record
+      `pgno|data|cksum` with SQLite's exact sparse checksum `cksum=nonce; i=pageSize-200; while i>0
+      {cksum+=data[i]; i-=200}`, stopping on the first bad checksum = SQLite's SQLITE_DONE
+      torn-final-record rule), applies pre-images to a shadow of the current image, truncates to
+      initPages, and requires the shadow's root ∈ {`merkle_root`, `prev_merkle_root`} BEFORE serving
+      any page. This verifies the EXACT image SQLite will serve, provenance-independent, so
+      re-planting a hot journal before every open cannot suppress it.
+    - **Bounded ±1 via `prev_merkle_root`** (reserved manifest bytes 4064..4096, backward-compatible,
+      zero in pre-D-MR6 manifests). Each seal writes prev = the prior commit's root, absorbing the ONE
+      irreducible journal-vs-manifest atomicity instant (crash after the manifest is sealed N+1 but
+      before the journal delete becomes durable — the still-hot journal rolls back to R_N = prev).
+    - **Guarantee:** a rollback of depth **≥2** (to a root older than prev) matches NEITHER accepted
+      root → REFUSED on EVERY open, cross- AND same-generation, re-plant-proof (regression MK(d):
+      depth-≥2 re-planted before 4 consecutive opens → refused every time, never stale). Never
+      laundered (recovery does not re-seal below the sealed root). **Residual = the irreducible
+      1-commit floor:** a rollback of depth EXACTLY 1 to the genuine immediately-previous committed
+      state matches `prev_merkle_root` and MAY pass — this is fundamental (two separate durable
+      objects cannot be updated atomically) and is the accepted boundary. Nothing deeper is accepted.
+    - **Anchor + sync-epoch under once-per-commit (D-MR6 item 4).** Generation now advances ~half as
+      fast, so a 1-commit whole-file rollback sits inside the anchor's ±1 crash slack. To keep
+      PEER-attested freshness strict, `AnchorEntry` gained a `epoch_floor` (anchor magic bumped
+      `ENCANCH1`→`ENCANCH2`; old anchors decode as absent = fresh, the existing safe fallback).
+      `apply_epoch` raises it; the open path refuses `db_generation < epoch_floor` with NO ±1 slack
+      (an external attestation has no local crash gap). The local self-commit `committed` keeps its
+      ±1 slack. Verified by SE (sync-epoch) + sync-e2e.
+    - **Crash-sweep: 0 corrupt/bricked** after the barrier change (13 rolled back, 5 committed). Full
+      crash-window analysis in `topics/freehold-vfs-merkle-root/D-MR6-commit-barrier-design.md`.
+    - **Review-round-3 hardening (D-MR6.1):**
+      - *Single finalization barrier, no double-fire (#3):* the three finalization hooks (header-zero
+        xWrite, xDelete, xTruncate-to-0) route through one `journal_finalize_barrier` that seals only
+        when the journal is genuinely HOT. Deleting an already-finalized journal at connection close is
+        a no-op → generation advances **exactly once per commit** (MK6(e): 3 commits ⇒ +3, not ~6).
+      - *No silent skip (#2):* if a hot journal's owner DB is not open at a finalization write, the
+        barrier hard-errors (SQLITE_IOERR) instead of silently skipping the seal (the old bogus
+        `pool_key([0;32])` path is gone).
+      - *Anchor AAD binding (H1):* the anchor now seals via `seal_bytes`/`open_bytes` with an AAD that
+        binds the anchor format magic + slot (`anchor_aad`), so an old-format (ENCANCH1) or
+        slot-swapped blob FAILS AUTHENTICATION. A peer `epoch_floor` is written to **both** double-
+        buffer slots, so a single-slot tamper cannot drop it (MK6(g.1): single-slot tamper after an
+        epoch → stale REFUSED). **Residual (§10.4, unchanged):** a full two-slot wipe / same-version
+        lower-seq replay still falls back to "fresh" — the local anchor is a deletable backstop; the
+        un-wipeable strong anchor is the online sync epoch (MK6(g.2) asserts this boundary explicitly).
+      - *Multi-record / multi-header journal replay (#4):* verified against SQLite `pager.c` — within a
+        segment, page records are packed CONTIGUOUSLY at stride `pageSize+8` (first record at the
+        sector-padded header end); a SECOND sector-aligned header appears only on a pager-cache spill
+        (large txn) or savepoint. `replay_journal_root` now LOOPS over header segments (round up to the
+        next sector, require the magic, else stop = SQLITE_DONE). MK6(h): a 1500-row baseline + a large
+        crashed UPDATE (≥2 journal records) replays to the EXACT baseline (root matches, reopens clean).
+        Honest note: the test reliably exercises the MULTI-RECORD path; a guaranteed multi-HEADER
+        (cache-spill) journal is hard to force deterministically in-harness, so that branch is defensive
+        + format-cited rather than positively hit every run.
+      - *Overflow/OOM guards:* manifest `decode` caps the file-count `n` before `n*stride` (wasm32
+        usize overflow / `Vec::with_capacity` OOM, M-2); `replay_journal_root` bounds `pgno` before
+        `shadow.resize` (attacker pgno near u32::MAX → OOM, L1).
+  - **WAL out of scope (F3):** WAL frames are outside the root's scope; `SQLITE_OPEN_WAL` is REFUSED
+    for a tracked DB (the VFS mandates journal=DELETE anyway).
+  - **Perf:** root recompute is O(blocks) per open (~one AEAD-decrypt + SHA-256 leaf per block).
+    Negligible for small DBs; for very large DBs a persisted Merkle *tree* with incremental update is
+    the future optimization. Measured commit latency unchanged (~6 ms/commit on the CI machine).
+  - **Consumer:** `full_state_root()` is exposed on the pool/util for block-delta (D-BD9) to use as a
+    base fingerprint + result check.
 - **§17.D precise commit hook.** Generation bumps on every main-DB xSync, not on
   `SQLITE_FCNTL_COMMIT_PHASETWO`; extra intra-op syncs (e.g. VACUUM) burn generations harmlessly
   (monotonic), but the "exactly once per logical commit" refinement is future work.

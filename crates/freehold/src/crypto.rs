@@ -252,6 +252,71 @@ pub fn file_id_for(path: &str) -> [u8; FILE_ID_LEN] {
     id
 }
 
+/// Domain-separation label for the full-state root leaf/interior hashes (freehold-vfs-merkle-root
+/// D-MR1). Bound into every hash so a root can never collide with any other SHA-256 use in the core.
+const MERKLE_ROOT_LABEL: &[u8] = b"freehold/full-state-root-v1";
+
+/// Incremental accumulator for a full-state root over a DB's plaintext blocks (D-MR1).
+///
+/// v1 form = a deterministic **flat hash-of-hashes**, index-ordered:
+///   root = SHA-256( LABEL ‖ block_count_LE(8) ‖ leaf_0 ‖ leaf_1 ‖ … )
+///   leaf_k = SHA-256( LABEL ‖ block_index_LE(8) ‖ plaintext_block_k )
+///
+/// This is a hash, not a cipher — the "no new crypto primitive for confidentiality" invariant holds
+/// (SHA-256 is already in the trusted core for HKDF + file_id). It is **stable across devices** for
+/// identical logical state: it depends only on plaintext content + block order, never on nonces,
+/// ciphertext, db_uuid, or physical layout. A flat hash-of-hashes (not a full Merkle tree) is
+/// accepted for v1 — correctness first; a tree is a future optimization for incremental update
+/// (noted in the topic). Binding the leaf index defends against block reordering/relocation, and
+/// binding the count defends against truncation/extension of the block set.
+pub struct FullStateRoot {
+    hasher: Sha256,
+    count: u64,
+}
+
+impl FullStateRoot {
+    pub fn new() -> Self {
+        // The running hasher absorbs LABEL, then each leaf digest as it arrives (`update_block`),
+        // then the total block count last (`finish`). The count is folded in at the END — once it
+        // is known — not reserved up front; see `finish`.
+        let mut hasher = Sha256::new();
+        hasher.update(MERKLE_ROOT_LABEL);
+        FullStateRoot { hasher, count: 0 }
+    }
+
+    /// Absorb one `B`-byte plaintext block at `block_index` (indices MUST be fed in ascending order,
+    /// contiguously from 0 — the caller iterates the block device in index order).
+    pub fn update_block(&mut self, block_index: u64, plaintext: &[u8]) {
+        let mut leaf = Sha256::new();
+        leaf.update(MERKLE_ROOT_LABEL);
+        leaf.update(block_index.to_le_bytes());
+        leaf.update(plaintext);
+        let leaf = leaf.finalize();
+        self.hasher.update(leaf);
+        self.count += 1;
+    }
+
+    /// Finalize the root. Folds in the block count so a shorter/longer block set never yields the
+    /// same root as a prefix/superset (truncation/extension resistance).
+    pub fn finish(mut self) -> [u8; 32] {
+        self.hasher.update(self.count.to_le_bytes());
+        let d = self.hasher.finalize();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&d);
+        out
+    }
+}
+
+impl Default for FullStateRoot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The sentinel "no root yet" value = all zeros (D-MR2). Distinguishable from a real root with
+/// overwhelming probability (a real SHA-256 output is all-zero with probability 2⁻²⁵⁶).
+pub const ZERO_ROOT: [u8; 32] = [0u8; 32];
+
 /// Build the AAD: `file_id(16) ‖ key_domain(16) ‖ block_index_LE(8) ‖ B_LE(4) ‖ cipher_id(1)` (§17.L).
 fn aad(
     file_id: &[u8; FILE_ID_LEN],
