@@ -166,12 +166,15 @@ export function remove_method(existing_prf, kek_id, blob) {
  * barrier), record `env_floor`, surface `recovery_code` once, then re-unlock with the new envelope
  * (which finalizes the swap). The session is locked on return.
  * @param {Uint8Array} prf
+ * @param {Uint8Array} envelope
  * @returns {Promise<any>}
  */
-export function rotate_dek(prf) {
+export function rotate_dek(prf, envelope) {
     const ptr0 = passArray8ToWasm0(prf, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.rotate_dek(ptr0, len0);
+    const ptr1 = passArray8ToWasm0(envelope, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.rotate_dek(ptr0, len0, ptr1, len1);
     return ret;
 }
 

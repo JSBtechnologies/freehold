@@ -2710,21 +2710,24 @@ pub fn session_export(cred_id: &[u8]) -> Result<Vec<u8>, JsValue> {
 //      with DEK′, which rolls the shadow forward (`recover_rotation`).
 // DEK and DEK′ never leave the worker (D-RK3); only the new envelope (opaque ciphertext) and the
 // one-time recovery code cross back. Returns `{ envelope, recovery_code }`.
-fn rotate_dek_inner(prf: &[u8]) -> std::result::Result<(Vec<u8>, String), String> {
+fn rotate_dek_inner(prf: &[u8], envelope: &[u8]) -> std::result::Result<(Vec<u8>, String), String> {
     let (new_env, code) = SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let s = guard
             .as_mut()
             .ok_or_else(|| "no active session — unlock before rotateKey".to_string())?;
-        // AUTHORIZE: the presenting passkey must open the live envelope. This also fixes the surviving
-        // method's PRF as the sole passkey slot carried into DEK′ (rotate_envelope wraps it at kek_id 0).
-        let old_dek = envelope::open_with_prf(&s.envelope, prf)
+        // AUTHORIZE against the CURRENT envelope the caller passes (not the session's open-time
+        // snapshot, which predates any add_recovery/add_passkey done since unlock). The presenting
+        // passkey must open it — this also fixes the surviving method's PRF as the sole passkey slot
+        // carried into DEK′ (rotate_envelope wraps it at kek_id 0). add_* re-wrap the SAME DEK, so
+        // this DEK equals the pool's; the physical re-seal itself keys off the pool's installed DEK.
+        let old_dek = envelope::open_with_prf(envelope, prf)
             .map_err(|_| "rotate: presenting passkey does not open the current envelope".to_string())?;
         // Fresh DEK′ (never persisted outside the new envelope) + the fresh envelope + recovery code.
         let new_dek = envelope::random_dek().map_err(|e| format!("rotate: random_dek: {e:?}"))?;
-        let (new_env, code) = envelope::rotate_envelope(&s.envelope, &new_dek, prf)
+        let (new_env, code) = envelope::rotate_envelope(envelope, &new_dek, prf)
             .map_err(|e| format!("rotate: rotate_envelope: {e:?}"))?;
-        let old_gen = envelope::envelope_generation(&s.envelope);
+        let old_gen = envelope::envelope_generation(envelope);
         let new_gen = envelope::envelope_generation(&new_env);
         // Close handles so `stage_rotation` sees flushed ciphertext at rest.
         for (_, db) in s.handles.drain() {
@@ -2748,9 +2751,9 @@ fn rotate_dek_inner(prf: &[u8]) -> std::result::Result<(Vec<u8>, String), String
 /// barrier), record `env_floor`, surface `recovery_code` once, then re-unlock with the new envelope
 /// (which finalizes the swap). The session is locked on return.
 #[wasm_bindgen]
-pub async fn rotate_dek(prf: &[u8]) -> Result<JsValue, JsValue> {
+pub async fn rotate_dek(prf: &[u8], envelope: &[u8]) -> Result<JsValue, JsValue> {
     console_error_panic_hook::set_once();
-    let (envelope, code) = rotate_dek_inner(prf).map_err(|e| JsValue::from_str(&e))?;
+    let (envelope, code) = rotate_dek_inner(prf, envelope).map_err(|e| JsValue::from_str(&e))?;
     let out = js_sys::Object::new();
     js_sys::Reflect::set(
         &out,

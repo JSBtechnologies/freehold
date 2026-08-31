@@ -407,6 +407,48 @@ export class FreeholdVault {
     await this.#bumpFloor(next);
   }
 
+  /** Rotate the DEK: re-encrypt every DB under a fresh key (DEK′) and issue a new envelope that wraps
+   *  it under ONLY this device's passkey + a freshly minted recovery code. Every OTHER method (other
+   *  passkeys, older recovery codes) is intentionally ORPHANED — this is what truly evicts a
+   *  compromised device: it may still hold the OLD DEK, but that key is now useless against the
+   *  re-encrypted database. Re-admit a trusted device by unlocking it with the new recovery code, then
+   *  addPasskey() there. Requires a live session.
+   *
+   *  Crash-safe across the two stores (OPFS image + IndexedDB envelope) by construction: the worker
+   *  stages a shadow image sealed under DEK′ (the live image is untouched), then the single
+   *  `idbSet('envelope')` below is THE commit barrier — a crash before it rolls the shadow back on the
+   *  next unlock, a crash after it rolls forward. Resolves to the one-time recovery code: show it ONCE
+   *  (mandatory backup — the same contract as enroll), then forget it. This re-unlock()s with the new
+   *  envelope before returning, so the vault is live under DEK′.
+   *
+   *  Limit (state it in your UI): rotation protects FUTURE state and forces an attacker off the live
+   *  DB; it cannot un-leak what a compromised device already exfiltrated, nor re-encrypt old image
+   *  copies the attacker kept (those still open under the old DEK they hold). */
+  async rotateKey() {
+    if (!(await this.isUnlocked())) {
+      throw new Error('vault is locked — call unlock() before rotateKey()');
+    }
+    const current = await this.#envelope(); // rollback-guarded current envelope (post any add_*)
+    let prf = await this.#prf();
+    // The worker authorizes against `current`, mints DEK′, builds the new envelope, stages the shadow
+    // image, and LOCKS the session. Passing `current` (not the session's open-time snapshot) makes the
+    // new generation climb past any recovery/passkey added since unlock, so the floor still accepts it.
+    const { envelope, recovery_code } = await this.#call('rotate_dek', [prf, current], [prf.buffer]);
+    prf = null;
+    // COMMIT BARRIER (D-RK4): one IndexedDB put is the linearization point. Order matters — persist the
+    // envelope, THEN raise the floor to its generation, so a crash between them still refuses the old
+    // envelope on the next open (floor only ever climbs).
+    await idbSet('envelope', envelope);
+    await this.#bumpFloor(envelope);
+    // The stored epoch was signed under the OLD DEK — meaningless on the DEK′ line. Drop it; a fresh
+    // one is minted on the next exportBundle()/sync under DEK′.
+    await idbDel('epoch');
+    // Finalize: re-unlock with the new envelope — session_open runs the worker's rotation recovery,
+    // which rolls the staged shadow forward so the live image is now under DEK′.
+    await this.unlock();
+    return recovery_code;
+  }
+
   /** List unlock methods as [{ kekId, kind }] (kind: 'passkey' | 'recovery'). */
   async listMethods() {
     const s = await this.#call('list_methods', [await this.#envelope()]);

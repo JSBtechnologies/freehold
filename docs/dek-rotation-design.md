@@ -206,10 +206,24 @@ second passkey re-enrolls).
   the old-DEK anchor as "fresh" and re-seeds the rollback floor from the (plaintext-preserved) manifest
   generation on first open. Safe because the DEK′ line begins at rotation, so no older DEK′ image can
   exist to roll back to; an explicit anchor re-seal can be added if a stricter local floor is wanted.
-- **Increment 2b NEXT:** SDK `rotateKey()` — assert the surviving passkey, call `rotate_dek`,
-  `idbSet('envelope', new_env)` (THE barrier) + `#bumpFloor` + `idbDel('epoch')` (old epoch is stale
-  under DEK′), surface the recovery code through the mandatory-backup UI, then re-`unlock()` (which
-  rolls the shadow forward). Then 2c demo "revoke + rotate" flow and 2d an E2E (§8 order (b)-(d)).
+- **Increment 2b DONE:** SDK `rotateKey()` (packages/db/index.js). Guards on the rollback-checked
+  current envelope, asserts this device's passkey, calls the worker `rotate_dek(prf, current)` (passing
+  the CURRENT envelope, not the session's open-time snapshot, so the new generation climbs past any
+  recovery/passkey added since unlock and the floor still accepts it), then commits: `idbSet('envelope',
+  new_env)` is THE barrier, `#bumpFloor(new_env)`, `idbDel('epoch')` (the stored epoch was signed under
+  the old DEK), and finally re-`unlock()` — which runs `recover_rotation` and rolls the shadow forward.
+  Returns the one-time recovery code for the mandatory-backup UI; the doc-comment states the rotation
+  guarantee's limit (protects future state; can't un-leak what was already exfiltrated). `rotate_dek`
+  signature updated to `(prf, envelope)` accordingly.
+- **Increment 2d DONE:** E2E `tests/rotate-e2e.spec.js` (virtual authenticator, real SDK→worker→wasm).
+  Enrolls, writes a row, adds a recovery code + a 2nd passkey (3 methods), `rotateKey()`, then asserts:
+  the returned code is fresh; the session is live under DEK′ and the row survives; the envelope now has
+  exactly 2 methods (this passkey + new recovery — the 2nd passkey orphaned); the OLD recovery code is
+  REFUSED while the NEW one opens; and a device is re-admitted by unlocking with the new code +
+  `addPasskey()`. All 4 E2E specs green.
+- **Increment 2c NEXT (last):** demo "revoke + rotate" UI flow wiring `rotateKey()` into
+  examples/demo with the mandatory one-time recovery-code display (§8 order (c)). Optional polish;
+  the security-critical path (2a/2b) is proven end-to-end.
 
 ## Cross-links
 [[header-free-encrypted-vfs]] design-spec §11 (the named-but-unbuilt rotation this fulfils),

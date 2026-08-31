@@ -74,6 +74,7 @@
       listMethods: () => vault.listMethods(),
       removeMethod: (kekId) => vault.removeMethod(kekId).then(() => true),
       addPasskey: () => vault.addPasskey().then(() => true),
+      rotateKey: () => vault.rotateKey(),
       enroll: () => vault.enroll().then(() => true),
       addRecoveryCode: (code) => vault.addRecoveryCode(code),
       unlock: () => vault.unlock().then(() => true),
