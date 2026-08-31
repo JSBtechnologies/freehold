@@ -161,6 +161,21 @@ export function remove_method(existing_prf, kek_id, blob) {
 }
 
 /**
+ * Rotate the DEK and re-encrypt every DB under it (issue #4). Requires a live session. Returns
+ * `{ envelope, recovery_code }`: the caller MUST persist `envelope` to IndexedDB (the commit
+ * barrier), record `env_floor`, surface `recovery_code` once, then re-unlock with the new envelope
+ * (which finalizes the swap). The session is locked on return.
+ * @param {Uint8Array} prf
+ * @returns {Promise<any>}
+ */
+export function rotate_dek(prf) {
+    const ptr0 = passArray8ToWasm0(prf, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.rotate_dek(ptr0, len0);
+    return ret;
+}
+
+/**
  * @returns {Promise<string>}
  */
 export function run_tests() {
@@ -830,7 +845,7 @@ function __wbg_get_imports() {
             return ret;
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 691, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 698, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__ha22148a4a7c1d5ff);
             return ret;
         },

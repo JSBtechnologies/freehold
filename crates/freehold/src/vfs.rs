@@ -2057,8 +2057,9 @@ impl OpfsSAHPool {
     // DB in the pool) is deliberately NOT carried here — the destination pool establishes a fresh
     // anchor on first commit; carrying the generation floor across rotation is increment-2 (commit
     // barrier) work. Reads via `export_raw`/writes are imported via `import_files`, so this adds no new
-    // storage path. Requires the DB to be CLOSED (operates on ciphertext at rest).
-    #[cfg(feature = "testing-api")]
+    // storage path. Requires the DB to be CLOSED (operates on ciphertext at rest). Production-callable
+    // (increment 2): the wired rotation ceremony (`stage_rotation`) drives it; the `reseal_db` util
+    // wrapper that also exposes it stays test-only (it is the RK proof harness).
     fn reseal_db_ciphertext(&self, db_name: &str, new_dek: &[u8; 32]) -> Result<Vec<(String, Vec<u8>)>> {
         let mname = manifest_name(db_name);
         // `db_uuid` lives in the manifest's PLAINTEXT header (magic(8) ‖ uuid(16)) — readable with no key.
@@ -2120,6 +2121,100 @@ impl OpfsSAHPool {
         }
         out.push((mname, m_out));
         Ok(out)
+    }
+
+    // issue #4 / D-RK2+D-RK4 (DEK rotation, increment 2): stage the OPFS half of a rotation ceremony
+    // crash-safely. Every named DB is re-keyed to `new_dek` via the pure per-block `reseal_db_ciphertext`
+    // and written to SHADOW files (`~rot` suffix) that coexist with the still-live image — nothing live
+    // is mutated (D-RK2, never re-encrypt in place). A single intent record (`__rotate_intent__`),
+    // sealed under `new_dek`, records `{old_gen, new_gen, db_names}`. The record authenticates ONLY under
+    // DEK′, so it is the crash-recovery signal (see `recover_rotation`): after this returns, the SDK's
+    // `idbSet('envelope', new_env)` is the commit barrier (D-RK4). A crash BEFORE that leaves the shadow
+    // as unreferenced garbage the next open rolls back; a crash AFTER rolls forward. DBs must be CLOSED
+    // (this reads ciphertext at rest). Caller supplies `new_dek` (a fresh `random_dek`, never persisted
+    // outside the new envelope) so DEK′ is recoverable on the next unlock and nowhere else.
+    fn stage_rotation(
+        &self,
+        new_dek: &[u8; 32],
+        db_names: &[String],
+        old_gen: u64,
+        new_gen: u64,
+    ) -> Result<()> {
+        // 1. Re-seal each DB under DEK′ into shadow files (main + manifest), leaving the live image alone.
+        for db in db_names {
+            let files = self.reseal_db_ciphertext(db, new_dek)?;
+            for (name, bytes) in files {
+                self.import_ciphertext_file(&shadow_name(&name), &bytes)?;
+            }
+        }
+        // 2. Intent record: {old_gen(8) | new_gen(8) | [len(1) | name]...} sealed under DEK′.
+        let mut plain = Vec::new();
+        plain.extend_from_slice(&old_gen.to_le_bytes());
+        plain.extend_from_slice(&new_gen.to_le_bytes());
+        for db in db_names {
+            if db.len() > 255 {
+                return Err(OpfsSAHError::Generic(format!("rotate: db name too long: {db:?}")));
+            }
+            plain.push(db.len() as u8);
+            plain.extend_from_slice(db.as_bytes());
+        }
+        let sealed = Crypto::rotate_intent_key(new_dek)
+            .seal_bytes(ROT_INTENT_AAD, &plain)
+            .map_err(|e| OpfsSAHError::Generic(format!("rotate intent seal: {e:?}")))?;
+        // The intent lands LAST: its presence is what arms recovery, so every shadow must precede it.
+        self.import_ciphertext_file(ROT_INTENT_NAME, &sealed)?;
+        Ok(())
+    }
+
+    // issue #4 / D-RK4: on open, reconcile any staged rotation against THIS pool's DEK (`self.dek`,
+    // whichever envelope just unlocked). No intent record → nothing to do. Intent present and it opens
+    // under our DEK → we are on the post-commit (new) line: roll FORWARD, replacing each live file with
+    // its DEK′ shadow, then dropping shadows + intent. Intent present but it does NOT open under our DEK
+    // → we are on the pre-commit (old) line (the envelope swap never happened): roll BACK, discarding the
+    // shadows + intent and keeping the untouched live image. Idempotent: forward consumes each shadow and
+    // deletes the intent last, so a re-run after a mid-roll crash finishes cleanly. Returns a short note
+    // for the test harness / logs; `None` when there was nothing to recover.
+    fn recover_rotation(&self) -> Result<Option<String>> {
+        if !self.has_filename(ROT_INTENT_NAME) {
+            return Ok(None);
+        }
+        let sealed = self.export_raw(ROT_INTENT_NAME)?;
+        match Crypto::rotate_intent_key(&self.dek).open_bytes(ROT_INTENT_AAD, &sealed) {
+            Ok(plain) => {
+                // Post-commit line: roll FORWARD.
+                let db_names = parse_rotation_intent(&plain)?;
+                for db in &db_names {
+                    for name in [db.clone(), manifest_name(db)] {
+                        let sname = shadow_name(&name);
+                        if self.has_filename(&sname) {
+                            let bytes = self.export_raw(&sname)?;
+                            self.import_ciphertext_file(&name, &bytes)?; // live := shadow (DEK′)
+                            let _ = self.delete_file(&sname);
+                        }
+                    }
+                }
+                let _ = self.delete_file(ROT_INTENT_NAME);
+                Ok(Some(format!("rotation rolled FORWARD ({} db)", db_names.len())))
+            }
+            Err(_) => {
+                // Pre-commit line (intent sealed under a DEK we don't hold): roll BACK.
+                self.discard_rotation_staging()?;
+                Ok(Some("rotation rolled BACK (pre-commit crash)".into()))
+            }
+        }
+    }
+
+    // Drop every rotation shadow + the intent record. Used on roll-back, and safe to call anytime.
+    fn discard_rotation_staging(&self) -> Result<()> {
+        let stale: Vec<String> = self
+            .get_filenames()
+            .into_iter()
+            .filter(|n| n.ends_with(ROT_SHADOW_SUFFIX) || n == ROT_INTENT_NAME)
+            .collect();
+        for n in stale {
+            let _ = self.delete_file(&n);
+        }
+        Ok(())
     }
 
     // ENC (M3, §14.9): model-based property test of the block device's size/offset arithmetic.
@@ -2219,6 +2314,40 @@ impl OpfsSAHPool {
 // name SQLite constructs, so it can never collide with a real database/journal path.
 fn manifest_name(db: &str) -> String {
     format!("{db}#manifest")
+}
+
+// issue #4 / D-RK4 (DEK rotation): staging file names. Neither can collide with a legitimate pool
+// file — `valid_pool_filename` requires a `.db`/`.db#manifest` tail, and `valid_db_name` (session
+// layer) forbids `~`/`#`/`_`-prefixed names — so SQLite never opens them and `session_export`'s
+// `.ends_with(".db")` filter never mistakes a shadow for a live DB.
+const ROT_SHADOW_SUFFIX: &str = "~rot";
+const ROT_INTENT_NAME: &str = "__rotate_intent__";
+const ROT_INTENT_AAD: &[u8] = b"freehold-rotate-intent";
+fn shadow_name(name: &str) -> String {
+    format!("{name}{ROT_SHADOW_SUFFIX}")
+}
+
+// Parse the rotation intent record's DB-name list (framing produced by `stage_rotation`):
+// `old_gen(8) | new_gen(8) | [len(1) | utf8-name]...`. The generations are advisory (the envelope
+// swap is the real barrier); only the names drive the roll-forward file replacement.
+fn parse_rotation_intent(plain: &[u8]) -> Result<Vec<String>> {
+    if plain.len() < 16 {
+        return Err(OpfsSAHError::Generic("rotate intent truncated".into()));
+    }
+    let mut names = Vec::new();
+    let mut at = 16usize;
+    while at < plain.len() {
+        let len = plain[at] as usize;
+        at += 1;
+        if at + len > plain.len() {
+            return Err(OpfsSAHError::Generic("rotate intent name overruns record".into()));
+        }
+        let name = std::str::from_utf8(&plain[at..at + len])
+            .map_err(|_| OpfsSAHError::Generic("rotate intent name not utf8".into()))?;
+        names.push(name.to_string());
+        at += len;
+    }
+    Ok(names)
 }
 
 // The only pool file names a legitimate export can produce: `<base>.db` or `<base>.db#manifest`,
@@ -2694,6 +2823,27 @@ impl OpfsSAHPoolUtil {
     #[cfg(feature = "testing-api")]
     pub fn reseal_db(&self, db_name: &str, new_dek: &[u8; 32]) -> Result<Vec<(String, Vec<u8>)>> {
         self.pool.reseal_db_ciphertext(db_name, new_dek)
+    }
+
+    /// issue #4 / D-RK2+D-RK4 (DEK rotation, increment 2): stage the OPFS half of a rotation ceremony
+    /// crash-safely — re-seal every `db_names` DB to `new_dek` into shadow files + write an intent
+    /// record sealed under `new_dek`, leaving the live image untouched (see `stage_rotation`). The DBs
+    /// must be CLOSED. The SDK's `idbSet('envelope')` that follows is the commit barrier.
+    pub fn stage_rotation(
+        &self,
+        new_dek: &[u8; 32],
+        db_names: &[String],
+        old_gen: u64,
+        new_gen: u64,
+    ) -> Result<()> {
+        self.pool.stage_rotation(new_dek, db_names, old_gen, new_gen)
+    }
+
+    /// issue #4 / D-RK4: reconcile any staged rotation against this pool's installed DEK on open —
+    /// roll FORWARD (intent opens under our DEK: commit happened) or BACK (it does not: pre-commit
+    /// crash). No-op when no rotation is staged. See `recover_rotation`.
+    pub fn recover_rotation(&self) -> Result<Option<String>> {
+        self.pool.recover_rotation()
     }
 
     /// ENC (M3 cross-device): export a DB's encrypted image (main + manifest) as a `name|hex` bundle.

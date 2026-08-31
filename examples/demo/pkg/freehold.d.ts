@@ -49,6 +49,14 @@ export function list_methods(blob: Uint8Array): string;
  */
 export function remove_method(existing_prf: Uint8Array, kek_id: number, blob: Uint8Array): Uint8Array;
 
+/**
+ * Rotate the DEK and re-encrypt every DB under it (issue #4). Requires a live session. Returns
+ * `{ envelope, recovery_code }`: the caller MUST persist `envelope` to IndexedDB (the commit
+ * barrier), record `env_floor`, surface `recovery_code` once, then re-unlock with the new envelope
+ * (which finalizes the swap). The session is locked on return.
+ */
+export function rotate_dek(prf: Uint8Array): Promise<any>;
+
 export function run_tests(): Promise<string>;
 
 /**
@@ -139,6 +147,7 @@ export interface InitOutput {
     readonly import_bundle: (a: number, b: number) => any;
     readonly list_methods: (a: number, b: number) => [number, number, number, number];
     readonly remove_method: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly rotate_dek: (a: number, b: number) => any;
     readonly run_tests: () => any;
     readonly session_active: () => number;
     readonly session_export: (a: number, b: number) => [number, number, number, number];

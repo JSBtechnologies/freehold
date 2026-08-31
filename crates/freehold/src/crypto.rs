@@ -122,6 +122,15 @@ impl Crypto {
     pub fn sync_key(dek: &[u8; 32]) -> Self {
         Self::from_info(dek, b"freehold-sync-v1")
     }
+
+    /// Subkey sealing the **DEK-rotation intent record** (issue #4 / D-RK4). During a rotation the
+    /// staged shadow image + intent are sealed under DEK′; the intent authenticates ONLY under DEK′,
+    /// so on the next open "does the intent decrypt under the DEK I just unlocked?" is exactly the
+    /// crash-recovery signal — it opens on the post-commit (new) line and fails on the pre-commit
+    /// (old) line, deciding roll-forward vs. roll-back. Domain-separated; no new cryptography.
+    pub fn rotate_intent_key(dek: &[u8; 32]) -> Self {
+        Self::from_info(dek, b"freehold-rotate-intent-v1")
+    }
 }
 
 /// The opaque per-database **sync-id** used to name a user's blob bucket on the blind relay

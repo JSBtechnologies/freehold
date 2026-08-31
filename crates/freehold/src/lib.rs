@@ -691,6 +691,114 @@ async fn rekey_test() -> std::result::Result<String, String> {
     )
 }
 
+/// Section RK2 — DEK rotation, the CRASH-SAFE COMMIT BARRIER (issue #4 / D-RK4, increment 2). Stitches
+/// the two proven halves (M3c envelope + RK physical re-seal) into the staged ceremony and exercises
+/// both crash windows around the linearization point (the SDK's `idbSet('envelope')`, modelled here by
+/// which DEK we re-open the SAME storage with). One pool dir, re-installed between phases exactly as a
+/// worker restart would re-open it. Proves: staging never touches the live image; a crash BEFORE the
+/// commit rolls BACK (old DEK still reads the old data, staging is GC'd); a crash AFTER rolls FORWARD
+/// (new DEK reads the data, and it is idempotent); and the rolled-forward DB no longer opens under the
+/// OLD DEK — eviction, end to end.
+async fn rotate_barrier_test() -> std::result::Result<String, String> {
+    const RDB: &str = "rotb.db";
+    const VFS: &str = "rot-barrier";
+    const DIR: &str = "rot-barrier";
+    // A fresh DEK′ guaranteed distinct from DEK_OK.
+    let mut new_dek = DEK_OK;
+    new_dek[0] ^= 0xff;
+    new_dek[31] ^= 0x0f;
+    let dbs = vec![RDB.to_string()];
+    let read_v = |util: &OpfsSAHPoolUtil| -> std::result::Result<Option<String>, String> {
+        unsafe {
+            match open_default(RDB) {
+                Ok(db) => {
+                    let v = scalar_text(db, "SELECT v FROM t LIMIT 1").ok();
+                    ffi::sqlite3_close(db);
+                    Ok(v)
+                }
+                Err(_) => Ok(None),
+            }
+        }
+        .map(|v| { let _ = util; v })
+    };
+    let staged = |util: &OpfsSAHPoolUtil| {
+        util.list().iter().any(|n| n.ends_with("~rot") || n == "__rotate_intent__")
+    };
+
+    // Device: fresh pool under DEK_OK, create + populate, close the handle (re-seal reads at rest).
+    let a = install_dir(VFS, DIR, true, &DEK_OK).await?;
+    unsafe {
+        let db = open_default(RDB)?;
+        set_pragmas(db)?;
+        exec(db, "CREATE TABLE t(v TEXT)")?;
+        exec(db, "INSERT INTO t(v) VALUES ('pre-rotation')")?;
+        ffi::sqlite3_close(db);
+    }
+    // Stage the rotation to DEK′ (shadow image + intent) — but DO NOT commit the envelope. The live
+    // image must be untouched: still readable under the OLD dek in this very pool.
+    a.stage_rotation(&new_dek, &dbs, 1, 2).map_err(|e| format!("RK2 stage: {e:?}"))?;
+    if read_v(&a)?.as_deref() != Some("pre-rotation") {
+        return Err("RK2: staging mutated the live image".into());
+    }
+    if !staged(&a) {
+        return Err("RK2: staging produced no shadow/intent files".into());
+    }
+    a.pause_vfs().map_err(|e| format!("RK2 pause a: {e:?}"))?;
+
+    // CASE A — CRASH BEFORE COMMIT: re-open the SAME storage with the OLD envelope (OLD dek). The
+    // intent is sealed under DEK′ so it will NOT open → recover_rotation rolls BACK. Old data survives.
+    let a1 = install_dir(VFS, DIR, false, &DEK_OK).await?;
+    let ra = a1.recover_rotation().map_err(|e| format!("RK2 recover A: {e:?}"))?;
+    if !ra.as_deref().unwrap_or_default().contains("BACK") {
+        return Err(format!("RK2 case A: expected roll-BACK, got {ra:?}"));
+    }
+    if read_v(&a1)?.as_deref() != Some("pre-rotation") {
+        return Err("RK2 case A: rollback lost the old data".into());
+    }
+    if staged(&a1) {
+        return Err("RK2 case A: rollback left staging files behind".into());
+    }
+    a1.pause_vfs().map_err(|e| format!("RK2 pause a1: {e:?}"))?;
+
+    // Re-stage for CASE B (rollback deleted the shadows).
+    let a2 = install_dir(VFS, DIR, false, &DEK_OK).await?;
+    a2.stage_rotation(&new_dek, &dbs, 1, 2).map_err(|e| format!("RK2 restage: {e:?}"))?;
+    a2.pause_vfs().map_err(|e| format!("RK2 pause a2: {e:?}"))?;
+
+    // CASE B — COMMIT HAPPENED: re-open with the NEW envelope (DEK′). Intent opens → roll FORWARD.
+    let b = install_dir(VFS, DIR, false, &new_dek).await?;
+    let rb = b.recover_rotation().map_err(|e| format!("RK2 recover B: {e:?}"))?;
+    if !rb.as_deref().unwrap_or_default().contains("FORWARD") {
+        return Err(format!("RK2 case B: expected roll-FORWARD, got {rb:?}"));
+    }
+    if read_v(&b)?.as_deref() != Some("pre-rotation") {
+        return Err("RK2 case B: forward corrupted the DB (unreadable under DEK\u{2032})".into());
+    }
+    if staged(&b) {
+        return Err("RK2 case B: forward left staging files behind".into());
+    }
+    // Idempotent: a second recovery is a clean no-op and the data still reads.
+    if b.recover_rotation().map_err(|e| format!("RK2 recover B2: {e:?}"))?.is_some() {
+        return Err("RK2 case B: second recovery was not a no-op".into());
+    }
+    if read_v(&b)?.as_deref() != Some("pre-rotation") {
+        return Err("RK2 case B: data lost after idempotent re-recovery".into());
+    }
+    b.pause_vfs().map_err(|e| format!("RK2 pause b: {e:?}"))?;
+
+    // EVICTION: the rolled-forward DB must NOT open under the OLD dek — the old key is now useless.
+    let c = install_dir(VFS, DIR, false, &DEK_OK).await?;
+    if read_v(&c)?.as_deref() == Some("pre-rotation") {
+        return Err("RK2: rotated DB still opens under the OLD DEK — eviction broken!".into());
+    }
+    c.pause_vfs().map_err(|e| format!("RK2 pause c: {e:?}"))?;
+
+    Ok(
+        "RK2. DEK rotation (crash-safe commit barrier): staging leaves the live image intact; a crash BEFORE the envelope commit rolls BACK (old DEK reads old data, staging GC'd); a crash AFTER rolls FORWARD (new DEK reads the data, idempotent); the rolled-forward DB no longer opens under the OLD DEK \u{2705}"
+            .to_string(),
+    )
+}
+
 /// Section S — the session model, driven exactly as the SDK drives it but with a MOCK PRF (no
 /// gesture): open → typed parameterized SQL on named DBs → isolation → strict-name and
 /// multi-statement-with-params rejection → lock kills ops → reopen sees the data. Runs on its own
@@ -2014,6 +2122,10 @@ async fn run() -> std::result::Result<String, String> {
     r.push_str(&rekey_test().await?);
     r.push('\n');
 
+    // ---- Section RK2: DEK rotation, crash-safe commit barrier (issue #4 / D-RK4, increment 2) -----
+    r.push_str(&rotate_barrier_test().await?);
+    r.push('\n');
+
     // ---- Section SJ: the SDK-facing session sync ops (wasm boundary the @freehold/db worker uses) -
     r.push_str(&sync_session_test().await?);
     r.push('\n');
@@ -2401,6 +2513,11 @@ async fn session_begin(
     let util = vfs::install::<ffi::WasmOsCallback>(cfg, true, dek)
         .await
         .map_err(|e| format!("install: {e:?}"))?;
+    // #4 / D-RK4: reconcile any DEK-rotation staged on a prior run BEFORE anything opens. If we
+    // unlocked the post-rotation envelope, `dek` is DEK′ and the intent opens → roll the shadow
+    // image forward; if we unlocked the pre-rotation envelope, the intent stays sealed → roll back.
+    // Runs against the just-installed pool's own DEK, so it is correct for whichever envelope opened.
+    let _ = util.recover_rotation().map_err(|e| format!("rotation recovery: {e:?}"))?;
     // sync-epoch: apply any peer epoch BEFORE anything opens so a DB rollback below it is refused.
     // #3c: the same token attests the key-envelope generation. Refuse a stale envelope below the
     // peer-attested floor — this catches a rolled-back envelope (e.g. one re-planting a revoked
@@ -2580,6 +2697,68 @@ fn session_export_inner(cred_id: &[u8]) -> std::result::Result<Vec<u8>, String> 
 pub fn session_export(cred_id: &[u8]) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
     session_export_inner(cred_id).map_err(|e| JsValue::from_str(&e))
+}
+
+// issue #4 / D-RK1..4 (DEK rotation, increment 2): the whole ceremony, atomic in the worker. Takes the
+// PRESENTING passkey's PRF (must open the live envelope — the rotation authorization) and rotates:
+//   1. mint a fresh DEK′ + a fresh envelope wrapping DEK′ under ONLY this passkey + a new recovery code
+//      (D-RK1: every absent method is orphaned — re-admit = re-enroll via the new code, never a re-wrap);
+//   2. close every open handle so the re-seal reads ciphertext at rest;
+//   3. stage the crash-safe shadow image + intent under DEK′ (D-RK2/D-RK4) — the live image and the OLD
+//      envelope are untouched, so a crash here simply "didn't rotate";
+//   4. lock the session. The SDK then commits `idbSet('envelope', new_env)` (the barrier) and re-unlocks
+//      with DEK′, which rolls the shadow forward (`recover_rotation`).
+// DEK and DEK′ never leave the worker (D-RK3); only the new envelope (opaque ciphertext) and the
+// one-time recovery code cross back. Returns `{ envelope, recovery_code }`.
+fn rotate_dek_inner(prf: &[u8]) -> std::result::Result<(Vec<u8>, String), String> {
+    let (new_env, code) = SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let s = guard
+            .as_mut()
+            .ok_or_else(|| "no active session — unlock before rotateKey".to_string())?;
+        // AUTHORIZE: the presenting passkey must open the live envelope. This also fixes the surviving
+        // method's PRF as the sole passkey slot carried into DEK′ (rotate_envelope wraps it at kek_id 0).
+        let old_dek = envelope::open_with_prf(&s.envelope, prf)
+            .map_err(|_| "rotate: presenting passkey does not open the current envelope".to_string())?;
+        // Fresh DEK′ (never persisted outside the new envelope) + the fresh envelope + recovery code.
+        let new_dek = envelope::random_dek().map_err(|e| format!("rotate: random_dek: {e:?}"))?;
+        let (new_env, code) = envelope::rotate_envelope(&s.envelope, &new_dek, prf)
+            .map_err(|e| format!("rotate: rotate_envelope: {e:?}"))?;
+        let old_gen = envelope::envelope_generation(&s.envelope);
+        let new_gen = envelope::envelope_generation(&new_env);
+        // Close handles so `stage_rotation` sees flushed ciphertext at rest.
+        for (_, db) in s.handles.drain() {
+            unsafe { ffi::sqlite3_close(db) };
+        }
+        let db_names: Vec<String> =
+            s.util.list().into_iter().filter(|n| n.ends_with(".db")).collect();
+        s.util
+            .stage_rotation(&new_dek, &db_names, old_gen, new_gen)
+            .map_err(|e| format!("rotate: stage: {e:?}"))?;
+        drop(old_dek);
+        Ok::<_, String>((new_env, code))
+    })?;
+    // Tear the session down (handles already drained): the SDK commits the new envelope and re-unlocks.
+    session_lock_inner()?;
+    Ok((new_env, code))
+}
+
+/// Rotate the DEK and re-encrypt every DB under it (issue #4). Requires a live session. Returns
+/// `{ envelope, recovery_code }`: the caller MUST persist `envelope` to IndexedDB (the commit
+/// barrier), record `env_floor`, surface `recovery_code` once, then re-unlock with the new envelope
+/// (which finalizes the swap). The session is locked on return.
+#[wasm_bindgen]
+pub async fn rotate_dek(prf: &[u8]) -> Result<JsValue, JsValue> {
+    console_error_panic_hook::set_once();
+    let (envelope, code) = rotate_dek_inner(prf).map_err(|e| JsValue::from_str(&e))?;
+    let out = js_sys::Object::new();
+    js_sys::Reflect::set(
+        &out,
+        &JsValue::from_str("envelope"),
+        &js_sys::Uint8Array::from(envelope.as_slice()),
+    )?;
+    js_sys::Reflect::set(&out, &JsValue::from_str("recovery_code"), &JsValue::from_str(&code))?;
+    Ok(out.into())
 }
 
 // ============================ session sync surface (freehold-sync-design §10 item 3) ============================

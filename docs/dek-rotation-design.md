@@ -186,9 +186,30 @@ second passkey re-enrolls).
   under the OLD DEK recovers nothing (the eviction property). The pool-global anchor is NOT carried
   (destination establishes a fresh one; carrying the generation floor is increment-2 work). This is a
   proof-only primitive (`#[cfg(feature = "testing-api")]`) — it graduates to a wired ceremony next.
-- **Increment 2 NEXT:** stitch the two halves (M3c envelope + RK image) into ONE atomic ceremony
-  behind the commit barrier (§6) — a `rotate_dek` worker op, SDK `rotateKey()`, anchor/floor carry-
-  forward, demo, and an E2E (§8 order). Cleanest after #3c.
+- **Increment 2a DONE:** the crash-safe worker ceremony core. `rotate_dek(prf)` (lib.rs, worker op)
+  authorizes with the presenting passkey, mints DEK′ + a fresh envelope (`rotate_envelope`, orphaning
+  absent methods — D-RK1), closes handles, and **stages** the OPFS half crash-safely (D-RK2/D-RK4):
+  `OpfsSAHPoolUtil::stage_rotation` re-seals every DB to shadow files (`~rot` suffix, via the 1b
+  `reseal_db_ciphertext` — now production, no `testing-api` gate) and writes a `__rotate_intent__`
+  record sealed under DEK′; the live image + old envelope are untouched, so a pre-commit crash is a
+  no-op. `recover_rotation` (called in `session_begin` before anything opens) reconciles on the next
+  unlock against the just-installed DEK: the intent opens under DEK′ ⇒ roll FORWARD (live := shadow,
+  GC staging); it does not ⇒ roll BACK (discard staging, keep live). DEK/DEK′ never leave the worker
+  (D-RK3); only the new envelope + one-time recovery code cross back. The IndexedDB `idbSet('envelope')`
+  remains THE commit barrier — it is the SDK step in 2b. New `rotate_intent_key` subkey (crypto.rs)
+  gives the intent its own AEAD domain. Proven by `run_tests` **RK2** (pinned in `merkle-root.spec.js`),
+  which models the barrier by which DEK re-opens the same storage: staging never mutates the live
+  image; a crash BEFORE commit rolls BACK (old DEK reads old data, staging GC'd); a crash AFTER rolls
+  FORWARD (new DEK reads the data) and is idempotent; the rolled-forward DB no longer opens under the
+  OLD DEK (eviction, end to end). `rotate_dek` added to the vault-worker OPS allowlist. All 3 E2E green.
+  NOTE (deferred, safe): the pool-global anchor is NOT carried across rotation — the new-DEK pool reads
+  the old-DEK anchor as "fresh" and re-seeds the rollback floor from the (plaintext-preserved) manifest
+  generation on first open. Safe because the DEK′ line begins at rotation, so no older DEK′ image can
+  exist to roll back to; an explicit anchor re-seal can be added if a stricter local floor is wanted.
+- **Increment 2b NEXT:** SDK `rotateKey()` — assert the surviving passkey, call `rotate_dek`,
+  `idbSet('envelope', new_env)` (THE barrier) + `#bumpFloor` + `idbDel('epoch')` (old epoch is stale
+  under DEK′), surface the recovery code through the mandatory-backup UI, then re-`unlock()` (which
+  rolls the shadow forward). Then 2c demo "revoke + rotate" flow and 2d an E2E (§8 order (b)-(d)).
 
 ## Cross-links
 [[header-free-encrypted-vfs]] design-spec §11 (the named-but-unbuilt rotation this fulfils),
