@@ -2137,9 +2137,18 @@ async fn run() -> std::result::Result<String, String> {
     Ok(r)
 }
 
+/// Install the console panic hook when the (default) `panic-hook` feature is on; a no-op otherwise.
+/// Every wasm entry point calls this so a panic surfaces a readable message in dev builds, while a
+/// production `default-features = false` build compiles it away and never links the crate.
+#[inline]
+fn install_panic_hook() {
+    #[cfg(feature = "panic-hook")]
+    console_error_panic_hook::set_once();
+}
+
 #[wasm_bindgen]
 pub async fn run_tests() -> String {
-    console_error_panic_hook::set_once();
+    install_panic_hook();
     match run().await {
         Ok(s) => s,
         Err(e) => format!("FAILED: {e}"),
@@ -2184,7 +2193,7 @@ async fn enroll_inner(prf: &[u8]) -> std::result::Result<Vec<u8>, String> {
 /// Enroll: wrap a fresh DEK under the PRF-KEK, initialize an empty vault, return the envelope blob.
 #[wasm_bindgen]
 pub async fn enroll(prf: &[u8]) -> Result<Vec<u8>, JsValue> {
-    console_error_panic_hook::set_once();
+    install_panic_hook();
     enroll_inner(prf).await.map_err(|e| JsValue::from_str(&e))
 }
 
@@ -2279,7 +2288,7 @@ const DUMMY_DEK: [u8; 32] = [0u8; 32];
 /// that epoch is then refused at open).
 #[wasm_bindgen]
 pub async fn import_bundle(bytes: &[u8]) -> Result<JsValue, JsValue> {
-    console_error_panic_hook::set_once();
+    install_panic_hook();
     let b = bundle::decode(bytes).map_err(|e| JsValue::from_str(&e))?;
     let util = vfs::install::<ffi::WasmOsCallback>(&demo_cfg("pk-import", true), true, &DUMMY_DEK)
         .await
@@ -2570,7 +2579,7 @@ fn session_lock_inner() -> std::result::Result<(), String> {
 /// `session_export` rides this session with no further prompts.
 #[wasm_bindgen]
 pub async fn session_open(prf: &[u8], blob: &[u8], epoch: &[u8]) -> Result<(), JsValue> {
-    console_error_panic_hook::set_once();
+    install_panic_hook();
     let dek = envelope::open_with_prf(blob, prf)
         .map_err(|_| JsValue::from_str("unlock failed — wrong passkey, wrong PRF/UV state, or tampered envelope"))?;
     session_begin(&dek, blob, epoch, &demo_cfg(SESSION_VFS, false))
@@ -2581,7 +2590,7 @@ pub async fn session_open(prf: &[u8], blob: &[u8], epoch: &[u8]) -> Result<(), J
 /// Open a session with the written recovery code instead of a passkey (same semantics).
 #[wasm_bindgen]
 pub async fn session_open_recovery(code: &str, blob: &[u8], epoch: &[u8]) -> Result<(), JsValue> {
-    console_error_panic_hook::set_once();
+    install_panic_hook();
     let dek = envelope::open_with_recovery(blob, code)
         .map_err(|_| JsValue::from_str("recovery code did not unlock — wrong code or tampered envelope"))?;
     session_begin(&dek, blob, epoch, &demo_cfg(SESSION_VFS, false))
@@ -2649,7 +2658,7 @@ fn session_sql_inner(db: &str, sql: &str, params_json: &str) -> std::result::Res
 /// a JSON array of row arrays (stringified values, NULL → null); no rows yields "[]".
 #[wasm_bindgen]
 pub fn session_sql(db: &str, sql: &str, params_json: &str) -> Result<String, JsValue> {
-    console_error_panic_hook::set_once();
+    install_panic_hook();
     session_sql_inner(db, sql, params_json).map_err(|e| JsValue::from_str(&e))
 }
 
@@ -2700,7 +2709,7 @@ fn session_export_inner(cred_id: &[u8], envelope: &[u8]) -> std::result::Result<
 /// is attested in the epoch, so a method added since unlock is reflected in the bundle.
 #[wasm_bindgen]
 pub fn session_export(cred_id: &[u8], envelope: &[u8]) -> Result<Vec<u8>, JsValue> {
-    console_error_panic_hook::set_once();
+    install_panic_hook();
     session_export_inner(cred_id, envelope).map_err(|e| JsValue::from_str(&e))
 }
 
@@ -2757,7 +2766,7 @@ fn rotate_dek_inner(prf: &[u8], envelope: &[u8]) -> std::result::Result<(Vec<u8>
 /// (which finalizes the swap). The session is locked on return.
 #[wasm_bindgen]
 pub async fn rotate_dek(prf: &[u8], envelope: &[u8]) -> Result<JsValue, JsValue> {
-    console_error_panic_hook::set_once();
+    install_panic_hook();
     let (envelope, code) = rotate_dek_inner(prf, envelope).map_err(|e| JsValue::from_str(&e))?;
     let out = js_sys::Object::new();
     js_sys::Reflect::set(
@@ -2895,21 +2904,21 @@ fn sync_reconcile_inner(local_vv: &[u8], incoming_vv: &[u8]) -> std::result::Res
 /// Opaque 16-byte relay bucket id for the live session's DEK + `db_uuid` (freehold-sync-design §4).
 #[wasm_bindgen]
 pub fn session_sync_id(db_uuid: &[u8]) -> Result<Vec<u8>, JsValue> {
-    console_error_panic_hook::set_once();
+    install_panic_hook();
     session_sync_id_inner(db_uuid).map_err(|e| JsValue::from_str(&e))
 }
 
 /// Seal the live session's current image + `vv` into a relay blob under the DEK-derived sync_key.
 #[wasm_bindgen]
 pub fn session_sync_seal(db_uuid: &[u8], vv: &[u8]) -> Result<Vec<u8>, JsValue> {
-    console_error_panic_hook::set_once();
+    install_panic_hook();
     session_sync_seal_inner(db_uuid, vv).map_err(|e| JsValue::from_str(&e))
 }
 
 /// Authenticated-open a relay blob → `{ dbUuid, vv, image }` (all Uint8Array). Wrong key/tamper Errs.
 #[wasm_bindgen]
 pub fn session_sync_open(sealed: &[u8]) -> Result<JsValue, JsValue> {
-    console_error_panic_hook::set_once();
+    install_panic_hook();
     let (db_uuid, vv, image) = session_sync_open_parts(sealed).map_err(|e| JsValue::from_str(&e))?;
     let out = js_sys::Object::new();
     for (k, v) in [("dbUuid", db_uuid.as_slice()), ("vv", vv.as_slice()), ("image", image.as_slice())] {
@@ -2921,7 +2930,7 @@ pub fn session_sync_open(sealed: &[u8]) -> Result<JsValue, JsValue> {
 /// Apply a pulled image into the live session (FastForward / fork-winner only). See inner docs.
 #[wasm_bindgen]
 pub fn session_sync_apply(image: &[u8]) -> Result<(), JsValue> {
-    console_error_panic_hook::set_once();
+    install_panic_hook();
     session_sync_apply_inner(image).map_err(|e| JsValue::from_str(&e))
 }
 

@@ -20,8 +20,13 @@ crate-type = ["cdylib", "rlib"]
 # THIS crate *is* the harness. A production consumer that vendors the `vfs` module builds with
 # `default-features = false`, and the raw/fault surface (which can bypass AEAD) disappears at
 # compile time (security-review 1.2/1.1).
-default = ["testing-api"]
+default = ["testing-api", "panic-hook"]
 testing-api = []
+# `panic-hook` pulls in `console_error_panic_hook` (dev diagnostics: surface wasm panic messages in
+# the worker console). Default-on for the harness; a production consumer building
+# `default-features = false` drops the crate entirely — panic messages are not exposed and the
+# dependency leaves the tree (attack-surface reduction).
+panic-hook = ["dep:console_error_panic_hook"]
 
 # wasm-opt (binaryen) crashes on this module on Windows (0xc0000409); rustc -O is what matters
 # for cipher throughput, so skip the post-pass.
@@ -49,7 +54,9 @@ hmac = "0.12"               # HMAC-SHA256 envelope authenticator (v3 anti-rollba
 zeroize = "1"               # Zeroizing scratch buffers / DEK — §17.M
 getrandom = { version = "0.2", features = ["js"] }  # CSPRNG (crypto.getRandomValues) — §8/§17.F
 argon2 = "0.5"              # Argon2id KDF for the recovery-code KEK (M3 envelope) — RustCrypto
-console_error_panic_hook = "0.1"  # dev harness only: surface panic messages in the worker console
+# dev harness only (gated behind the default `panic-hook` feature): surface panic messages in the
+# worker console. Optional so a production `default-features = false` build omits it entirely.
+console_error_panic_hook = { version = "0.1", optional = true }
 
 [dependencies.web-sys]
 version = "0.3"
