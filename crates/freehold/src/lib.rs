@@ -243,7 +243,7 @@ async fn sync_epoch_test() -> std::result::Result<String, String> {
         let db = open_default(SDB)?;
         exec(db, "INSERT INTO t(v) VALUES ('two'),('three')")?; // advance the generation
         ffi::sqlite3_close(db);
-        let ep = a.export_epoch(SDB).map_err(|e| format!("export epoch: {e:?}"))?; // attests the HIGH gen
+        let ep = a.export_epoch(SDB, 0).map_err(|e| format!("export epoch: {e:?}"))?; // attests the HIGH db gen
         (early, ep)
     };
     let gen_a = a.manifest_generation(SDB).unwrap_or(0);
@@ -252,7 +252,7 @@ async fn sync_epoch_test() -> std::result::Result<String, String> {
     // ---- Device B: apply A's LATE epoch, then be handed only the STALE image. B never saw the fresh
     // state — the peer epoch is the ONLY reason it knows the import is a rollback. Must be REJECTED. --
     let b = install_dir("se-b", "epoch-b", true, &DEK_OK).await?;
-    let seen = b.apply_epoch(&epoch_late).map_err(|e| format!("B apply epoch: {e:?}"))?;
+    let (seen, _) = b.apply_epoch(&epoch_late).map_err(|e| format!("B apply epoch: {e:?}"))?;
     b.import_files(&img_early).map_err(|e| format!("B import early: {e:?}"))?;
     let rolled_back_rejected = unsafe {
         match open_default(SDB) {
@@ -291,6 +291,81 @@ async fn sync_epoch_test() -> std::result::Result<String, String> {
         "SE. sync-epoch anchor: A commits to gen {gen_a} and attests epoch={seen}; B (which never saw \
 the fresh state) applies the peer epoch then is fed the STALE image → open REJECTED; contrast device \
 with NO epoch opens the same stale image → the peer epoch is exactly what prevents the rollback \u{2705}"
+    ))
+}
+
+/// Cross-device ENVELOPE-rollback test (#3c): the epoch token now attests the key-envelope
+/// generation as well as the DB generation. A peer that has advanced the envelope (e.g. after
+/// revoking a device) mints an epoch attesting the newer generation; a device fed a STALE envelope
+/// (which would re-plant a revoked slot) is then refused at `session_open` — even though it never
+/// locally witnessed the newer envelope. This exercises the REAL enforcement path (session_begin),
+/// not just the token round-trip. Contrast: a matching epoch (or none) opens the same envelope.
+async fn sync_envelope_epoch_test() -> std::result::Result<String, String> {
+    const SEDB: &str = "seenv.db";
+    let prf: [u8; 32] = [11u8; 32]; // synthetic passkey PRF for this device's slot
+
+    // A STALE envelope: create (gen 1) + add a recovery slot (gen 2). Opens under `prf` → DEK_OK.
+    let mut env_low = envelope::create_envelope(&DEK_OK, &prf)
+        .map_err(|e| format!("SE3c create envelope: {e:?}"))?;
+    let code_low = envelope::generate_recovery_code().map_err(|e| format!("SE3c gen code: {e:?}"))?;
+    env_low = envelope::add_recovery_slot(&env_low, &DEK_OK, &code_low)
+        .map_err(|e| format!("SE3c add recovery: {e:?}"))?;
+    let g_low = envelope::envelope_generation(&env_low);
+    let g_hi = g_low + 3; // a peer that has advanced the envelope past this stale copy
+
+    // Device A (the peer): a pool holding a DB so it can mint epoch tokens. It attests two envelope
+    // generations under the SAME DEK — a HIGHER one (post-revoke) and one matching the stale copy.
+    let a = install_dir("se3c-a", "se3c-a", true, &DEK_OK).await?;
+    let (epoch_hi, epoch_ok) = unsafe {
+        let db = open_default(SEDB)?;
+        set_pragmas(db)?;
+        exec(db, "CREATE TABLE t(v TEXT)")?;
+        exec(db, "INSERT INTO t(v) VALUES ('x')")?;
+        ffi::sqlite3_close(db);
+        let hi = a.export_epoch(SEDB, g_hi).map_err(|e| format!("SE3c epoch hi: {e:?}"))?;
+        let ok = a.export_epoch(SEDB, g_low).map_err(|e| format!("SE3c epoch ok: {e:?}"))?;
+        (hi, ok)
+    };
+    a.pause_vfs().map_err(|e| format!("SE3c pause A: {e:?}"))?;
+
+    // Enforcement runs inside session_begin, reached via the real session_open. Clean any prior one.
+    session_lock().map_err(|e| format!("SE3c pre-lock: {e:?}"))?;
+
+    // (1) REFUSED: stale envelope (gen g_low) under a peer epoch attesting g_hi → rollback, no unlock.
+    if session_open(&prf, &env_low, &epoch_hi).await.is_ok() {
+        session_lock().ok();
+        return Err(format!(
+            "SE3c: session_open ACCEPTED a stale envelope (gen {g_low}) below peer-attested {g_hi}!"
+        ));
+    }
+    if session_active() {
+        return Err("SE3c: session left active after a refused open".into());
+    }
+
+    // (2) ALLOWED (contrast): a peer epoch attesting exactly g_low opens the same envelope.
+    session_open(&prf, &env_low, &epoch_ok)
+        .await
+        .map_err(|e| format!("SE3c: matching-epoch open refused: {e:?}"))?;
+    if !session_active() {
+        return Err("SE3c: matching-epoch open did not activate the session".into());
+    }
+    session_lock().map_err(|e| format!("SE3c lock after (2): {e:?}"))?;
+
+    // (3) ALLOWED (contrast): with NO epoch the stale envelope opens — the peer epoch is exactly what
+    // turns a stale envelope into a refusal (mirrors the SE DB-image contrast device).
+    session_open(&prf, &env_low, &[])
+        .await
+        .map_err(|e| format!("SE3c: no-epoch open refused: {e:?}"))?;
+    if !session_active() {
+        return Err("SE3c: no-epoch open did not activate the session".into());
+    }
+    session_lock().map_err(|e| format!("SE3c lock after (3): {e:?}"))?;
+
+    Ok(format!(
+        "SE3c. cross-device envelope-rollback: peer attests env-gen={g_hi}; a device fed the STALE \
+envelope (gen {g_low}, which re-plants a revoked slot) is REFUSED at session_open; a matching epoch \
+(gen {g_low}) and no-epoch both open the same envelope → the peer epoch is what prevents re-admitting \
+an evicted device \u{2705}"
     ))
 }
 
@@ -1792,12 +1867,12 @@ async fn run() -> std::result::Result<String, String> {
                 exec(db, "INSERT INTO t(v) VALUES ('two'),('three'),('four')")?;
                 ffi::sqlite3_close(db);
             }
-            let epoch_late = a.export_epoch(ADB).map_err(|e| format!("MK6g epoch: {e:?}"))?;
+            let epoch_late = a.export_epoch(ADB, 0).map_err(|e| format!("MK6g epoch: {e:?}"))?;
             a.pause_vfs().map_err(|e| format!("MK6g A pause: {e:?}"))?;
 
             // Device B: apply the late epoch (writes epoch_floor into BOTH anchor slots over time).
             let bdev = install_dir("mk6-anc-b", "enc-mk6-anc-b", true, &DEK_OK).await.map_err(|e| format!("MK6g B install: {e}"))?;
-            let _seen = bdev.apply_epoch(&epoch_late).map_err(|e| format!("MK6g B apply epoch: {e:?}"))?;
+            let _seen = bdev.apply_epoch(&epoch_late).map_err(|e| format!("MK6g B apply epoch: {e:?}"))?.0;
             bdev.import_files(&early).map_err(|e| format!("MK6g B import early: {e:?}"))?;
 
             // (g.1) CLOSED: corrupt only the ACTIVE anchor slot (single-write substitution). The other
@@ -1925,6 +2000,10 @@ async fn run() -> std::result::Result<String, String> {
 
     // ---- Sync-epoch anchor (peer-attested rollback prevention) ---------------------------------
     r.push_str(&sync_epoch_test().await?);
+    r.push('\n');
+
+    // ---- #3c: peer epoch also attests the key-envelope generation (cross-device envelope rollback)
+    r.push_str(&sync_envelope_epoch_test().await?);
     r.push('\n');
 
     // ---- Section SY: Freehold Sync ordering + fork semantics (blind-relay mock) -----------------
@@ -2322,9 +2401,23 @@ async fn session_begin(
     let util = vfs::install::<ffi::WasmOsCallback>(cfg, true, dek)
         .await
         .map_err(|e| format!("install: {e:?}"))?;
-    // sync-epoch: apply any peer epoch BEFORE anything opens so a rollback below it is refused.
+    // sync-epoch: apply any peer epoch BEFORE anything opens so a DB rollback below it is refused.
+    // #3c: the same token attests the key-envelope generation. Refuse a stale envelope below the
+    // peer-attested floor — this catches a rolled-back envelope (e.g. one re-planting a revoked
+    // device's slot) even on a device that never locally witnessed the newer generation. The
+    // envelope lives outside the pool, so the pool returns the attested value and we enforce here.
     if !epoch.is_empty() {
-        util.apply_epoch(epoch).map_err(|e| format!("apply_epoch: {e:?}"))?;
+        let (_db_gen, attested_env_gen) =
+            util.apply_epoch(epoch).map_err(|e| format!("apply_epoch: {e:?}"))?;
+        let have = envelope::envelope_generation(envelope);
+        if have < attested_env_gen {
+            // Release the freshly installed pool before bailing so no SAH handles leak.
+            let _ = util.pause_vfs();
+            return Err(format!(
+                "envelope rollback vs peer epoch (generation {have} < attested {attested_env_gen}) \
+                 — refusing a stale key-envelope"
+            ));
+        }
     }
     SESSION.with(|s| {
         *s.borrow_mut() = Some(Session { util, envelope: envelope.to_vec(), handles: HashMap::new() })
@@ -2469,9 +2562,12 @@ fn session_export_inner(cred_id: &[u8]) -> std::result::Result<Vec<u8>, String> 
             .iter()
             .find(|n| n.as_str() == "app.db")
             .unwrap_or(&db_names[0]);
+        // #3c: attest this session's key-envelope generation inside the token so a peer refuses a
+        // rolled-back envelope. The live session holds the envelope, so we can read it here.
+        let env_gen = envelope::envelope_generation(&s.envelope);
         let epoch = s
             .util
-            .export_epoch(epoch_db)
+            .export_epoch(epoch_db, env_gen)
             .map_err(|e| format!("export_epoch {epoch_db}: {e:?}"))?;
         Ok(bundle::encode(&s.envelope, cred_id, &files, &epoch))
     })

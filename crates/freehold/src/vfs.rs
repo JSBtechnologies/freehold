@@ -1926,10 +1926,14 @@ impl OpfsSAHPool {
     }
 
     // ============ ENC (sync-epoch): peer-attested freshness (sync-epoch-design §4/§5) =============
-    // Mint an epoch token for `db_name`: seal {db_uuid, generation, device_id} under K_epoch. Any of
-    // the user's devices (sharing the DEK) can verify it; nobody without the DEK can forge it. The
-    // generation is the manifest's current db_generation (the freshest state this device has).
-    fn export_epoch(&self, db_name: &str) -> Result<Vec<u8>> {
+    // Mint an epoch token for `db_name`: seal {db_uuid, db_generation, env_generation, device_id}
+    // under K_epoch. Any of the user's devices (sharing the DEK) can verify it; nobody without the
+    // DEK can forge it. `db_generation` is the manifest's current value (freshest DB state this
+    // device has); `env_generation` (#3c) is the key-envelope generation the caller (the live
+    // session, which holds the envelope) attests — it lets a peer refuse a rolled-back envelope
+    // (e.g. one re-planting a revoked slot) even on a device that never locally saw that generation.
+    // Layout: uuid(16) | db_gen(8 LE) | env_gen(8 LE) | device_id(16) = 48 bytes.
+    fn export_epoch(&self, db_name: &str, env_generation: u64) -> Result<Vec<u8>> {
         let mname = manifest_name(db_name);
         let (uuid, _kdb, payload) = {
             let files = self.map_filename_to_file.borrow();
@@ -1938,9 +1942,10 @@ impl OpfsSAHPool {
                 .ok_or_else(|| OpfsSAHError::Generic("no manifest — nothing to attest".into()))?;
             self.read_manifest(mfile, &mname)?
         };
-        let mut plain = Vec::with_capacity(16 + 8 + 16);
+        let mut plain = Vec::with_capacity(16 + 8 + 8 + 16);
         plain.extend_from_slice(&uuid);
         plain.extend_from_slice(&payload.db_generation.to_le_bytes());
+        plain.extend_from_slice(&env_generation.to_le_bytes());
         plain.extend_from_slice(&self.device_id);
         Crypto::epoch_key(&self.dek)
             .seal_bytes(EPOCH_AAD, &plain)
@@ -1960,10 +1965,13 @@ impl OpfsSAHPool {
 
     // Apply a peer's epoch token: verify under K_epoch, then RAISE this device's local anchor
     // high-water mark (`committed`) for that db_uuid — max only, never lower. The existing open-path
-    // rollback check (`manifest_gen + 1 < committed`) then refuses any local state older than what a
-    // peer has witnessed. Returns the attested generation. A stale token (gen ≤ our committed) is a
-    // harmless no-op; a forged/tampered token fails authentication.
-    fn apply_epoch(&self, token: &[u8]) -> Result<u64> {
+    // rollback check (`manifest_gen + 1 < committed`) then refuses any local DB state older than what
+    // a peer has witnessed. Returns `(db_generation, env_generation)` — the DB floor (raised into the
+    // anchor here) and the attested key-envelope generation (#3c; the caller enforces it against the
+    // envelope it is about to unlock, since the envelope lives outside the pool). A stale token
+    // (gen ≤ our committed) is a harmless no-op; a forged/tampered token fails authentication.
+    // Accepts the legacy 40-byte layout (no env_gen) → env_generation reads as 0.
+    fn apply_epoch(&self, token: &[u8]) -> Result<(u64, u64)> {
         let plain = Crypto::epoch_key(&self.dek)
             .open_bytes(EPOCH_AAD, token)
             .map_err(|_| {
@@ -1975,10 +1983,15 @@ impl OpfsSAHPool {
         let mut uuid = [0u8; 16];
         uuid.copy_from_slice(&plain[..16]);
         let gen = u64::from_le_bytes(plain[16..24].try_into().unwrap());
+        let env_gen = if plain.len() >= 32 {
+            u64::from_le_bytes(plain[24..32].try_into().unwrap())
+        } else {
+            0
+        };
         // D-MR6: a peer epoch is a STRICT external freshness floor (no local ±1 crash slack). Raise
         // both the crash-tolerant `committed` high-water AND the strict `epoch_floor`.
         self.anchor_record_full(&uuid, Some(gen), Some(gen), Some(gen))?;
-        Ok(gen)
+        Ok((gen, env_gen))
     }
 
     // ENC (M3 cross-device): serialize a DB's on-disk CIPHERTEXT (main + manifest) as a text bundle
@@ -2696,14 +2709,17 @@ impl OpfsSAHPoolUtil {
     }
 
     /// ENC (sync-epoch): mint this device's epoch token for `db_name` (DEK-authenticated freshness
-    /// attestation to hand to a peer). Requires the pool installed with the REAL DEK.
-    pub fn export_epoch(&self, db_name: &str) -> Result<Vec<u8>> {
-        self.pool.export_epoch(db_name)
+    /// attestation to hand to a peer). `env_generation` (#3c) is the current key-envelope generation
+    /// the caller attests alongside the DB generation. Requires the pool installed with the REAL DEK.
+    pub fn export_epoch(&self, db_name: &str, env_generation: u64) -> Result<Vec<u8>> {
+        self.pool.export_epoch(db_name, env_generation)
     }
 
-    /// ENC (sync-epoch): apply a peer's epoch token — verify + raise the local freshness high-water
-    /// mark so a subsequent rollback below it is refused at open. Requires the REAL DEK.
-    pub fn apply_epoch(&self, token: &[u8]) -> Result<u64> {
+    /// ENC (sync-epoch): apply a peer's epoch token — verify + raise the local DB freshness
+    /// high-water mark so a subsequent rollback below it is refused at open. Returns
+    /// `(db_generation, env_generation)`; the caller enforces the attested envelope generation
+    /// (#3c) against the envelope it unlocks. Requires the REAL DEK.
+    pub fn apply_epoch(&self, token: &[u8]) -> Result<(u64, u64)> {
         self.pool.apply_epoch(token)
     }
 

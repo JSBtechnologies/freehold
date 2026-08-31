@@ -453,7 +453,9 @@ export class FreeholdVault {
     if (meta.epoch && meta.epoch.length) await idbSet('epoch', meta.epoch); else await idbDel('epoch');
     // ADOPT the imported envelope's generation as the new floor: an import is an explicit re-baseline
     // of THIS device from a trusted bundle of yours. The local floor guards this device's own envelope
-    // timeline against silent rollback; cross-device envelope ordering is epoch-bound separately (#3c).
+    // timeline against silent rollback. Cross-device envelope rollback is additionally epoch-bound
+    // (#3c): the bundle's epoch token attests the envelope generation, and the next unlock refuses a
+    // stale envelope below the peer-attested floor (enforced in the worker at session_begin).
     await idbSet('env_floor', await this.#call('envelope_generation', [meta.envelope]));
     return meta;
   }
