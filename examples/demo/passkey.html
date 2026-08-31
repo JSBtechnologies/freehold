@@ -42,6 +42,14 @@
     <h2>2 · Add unlock methods</h2>
     <button id="addRecovery" disabled>Add recovery code</button>
     <button id="addPasskey" disabled>Add another passkey</button>
+    <div id="backupNotice" style="display:none; margin-top:10px; padding:12px; border-radius:10px;
+         border:1px solid #7e6a33; background:#221c0e;">
+      <b style="color:#ffe08a;">⚠ Backup required to finish setup.</b>
+      <span class="muted">Your data currently unlocks with THIS device's passkey only — lose the device and it's gone.
+      Save a recovery code (device-independent) before moving on. Export stays disabled until you do.</span>
+      <div id="backupCode"></div>
+      <button id="ackBackup" class="primary" style="display:none">I've written it down — finish setup</button>
+    </div>
 
     <h2>3 · Unlock / lock the session</h2>
     <button id="unlock" disabled>Unlock with passkey</button>
@@ -80,7 +88,33 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
     const out = $('out');
     const log = (msg, cls) => { out.className = cls || ''; out.textContent = msg; };
 
-    if (!FreeholdVault.isSupported()) log('This browser lacks WebAuthn or OPFS — the demo cannot run.', 'err');
+    // CAPABILITY PREFLIGHT (hard gate): before anything, check every requirement and disable Enroll
+    // with a clear reason if the browser can't run Freehold — no more crypto failure deep in the stack.
+    const caps = FreeholdVault.capabilities();
+    if (!caps.ok) {
+      $('enroll').disabled = true;
+      log('This browser cannot run Freehold:\n  · ' + caps.reasons.join('\n  · ') +
+          '\n\nEnroll is disabled. Freehold needs a modern browser (recent Chrome/Edge/Safari/Firefox) ' +
+          'over HTTPS or localhost.', 'err');
+    } else {
+      // Two requirements can't be settled synchronously — probe them in a worker/authenticator:
+      //  · SAH: the definitive OPFS storage-floor check (createSyncAccessHandle is worker-only).
+      //  · PRF: warn (don't block) if the browser reports no WebAuthn-PRF support.
+      FreeholdVault.probeSah().then((sah) => {
+        if (!sah) {
+          $('enroll').disabled = true;
+          log('This browser has OPFS but not SyncAccessHandle — Freehold’s storage floor. Enroll is ' +
+              'disabled. Use a recent Chrome/Edge/Safari/Firefox.', 'err');
+        }
+      });
+      FreeholdVault.probePrf().then((prf) => {
+        if (prf === 'unsupported') {
+          log('Heads up: this browser reports NO WebAuthn-PRF support. Passkey unlock will fail; ' +
+              'you can still use a recovery code. Enroll to confirm.', 'err');
+        }
+      });
+    }
+
     let vault;
     try {
       vault = await FreeholdVault.open({
@@ -88,7 +122,8 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
         rpName: 'freehold demo',
       });
     } catch (e) {
-      // Most likely the tab guard ("already open in another tab") — surface it instead of a dead UI.
+      // Capability gate or the tab guard ("already open in another tab") — surface it, not a dead UI.
+      $('enroll').disabled = true;
       log(e.message, 'err');
       throw e;
     }
@@ -112,12 +147,26 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
         li.append(label, del); ul.append(li);
       }
     }
+    // First-run acknowledgement: after enroll auto-creates a recovery code, the user must click
+    // "finish setup" (proving they saw the once-shown code) before export unlocks. Returning users
+    // whose envelope already carries a recovery slot never see this — needsBackup is false for them.
+    let setupPending = false;
+
     async function syncButtons() {
       const has = await vault.isEnrolled();
+      const needsBackup = has && await vault.needsBackup();
       $('unlock').disabled = !has; $('addRecovery').disabled = !has;
       $('addPasskey').disabled = !has; $('unlockRecovery').disabled = !has;
-      $('exportBundle').disabled = !has; $('addNote').disabled = !has;
       $('lock').disabled = !has;
+      // GATE: the "move to another device" actions stay locked until a device-independent recovery
+      // method exists AND the user has acknowledged saving it — you can't ship a bundle you could
+      // never recover. This is the non-bypassable bit (issue #2).
+      const blocked = !has || needsBackup || setupPending;
+      $('exportBundle').disabled = blocked;
+      $('addNote').disabled = blocked;
+      $('backupNotice').style.display = (has && (needsBackup || setupPending)) ? 'block' : 'none';
+      // Enroll is available only on a supported browser with no envelope yet.
+      $('enroll').disabled = !caps.ok || has;
     }
 
     $('addNote').onclick = async () => {
@@ -159,6 +208,7 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
 
     $('enroll').onclick = async () => {
       try {
+        $('enroll').disabled = true;
         log('Registering a passkey, wrapping a fresh DEK, opening a session, creating the schema…');
         await vault.enroll();
         await vault.unlock(); // one ceremony opens the session; everything below rides it
@@ -166,10 +216,43 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
         await vault.sql('CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY, body TEXT, at TEXT)');
         await vault.sql("INSERT INTO notes(body, at) VALUES (?, datetime('now'))",
           ['unlocked-by-your-passkey \u{1F510}']);
+        // MANDATORY BACKUP STEP (issue #2): setup is not "done" until a device-independent recovery
+        // method exists. Drive it now (one more passkey tap), show the code once, and hold export
+        // behind an explicit acknowledgement. If this step fails/cancels, needsBackup keeps the gate up.
+        setupPending = true;
         await syncButtons(); await refreshMethods();
-        log('Enrolled + unlocked: schema created, first note seeded — the session stays open ' +
-            '(no more prompts until Lock). Add a recovery code so you can get in without this device.', 'ok');
-      } catch (e) { log('Enroll failed: ' + (e.message || e), 'err'); }
+        log('Enrolled + unlocked. One required step left: save your recovery code (shown below). ' +
+            'Approve your passkey once more to mint it…', 'ok');
+        await beginMandatoryBackup();
+      } catch (e) {
+        log('Enroll failed: ' + (e.message || e), 'err');
+        $('enroll').disabled = false;
+      }
+    };
+
+    // Mint + add a recovery code and render it into the backup notice with a finish-setup gate.
+    async function beginMandatoryBackup() {
+      const box = $('backupCode');
+      try {
+        const code = await vault.addRecoveryCode();
+        box.innerHTML = 'Your one-time recovery code — <b>write it down now</b>:' +
+          '<code class="big">' + code + '</code>';
+        $('ackBackup').style.display = 'inline-block';
+        await syncButtons(); await refreshMethods();
+      } catch (e) {
+        // Couldn't mint it (e.g. passkey cancelled). Leave needsBackup up; user can use the button.
+        box.innerHTML = '<span class="err">Could not create a recovery code (' + (e.message || e) +
+          '). Click “Add recovery code” above to try again — export stays locked until then.</span>';
+        setupPending = false; // fall back to the needsBackup gate (no slot exists yet)
+        await syncButtons();
+      }
+    }
+
+    $('ackBackup').onclick = async () => {
+      setupPending = false;
+      $('ackBackup').style.display = 'none';
+      await syncButtons();
+      log('Setup complete — recovery code saved. You can now add data and export a bundle to another device.', 'ok');
     };
 
     $('addRecovery').onclick = async () => {
@@ -229,6 +312,9 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
 
     $('reset').onclick = async () => {
       await vault.reset();
+      setupPending = false;
+      $('ackBackup').style.display = 'none';
+      $('backupCode').innerHTML = '';
       await syncButtons(); await refreshMethods();
       log('Forgot the stored envelope. (Passkeys still live in your authenticator.)', 'muted');
     };

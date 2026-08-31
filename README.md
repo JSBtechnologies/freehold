@@ -110,11 +110,33 @@ audited — don't bet lives on it.
 
 - ~~Session model (one passkey ceremony, many queries), parameterized SQL, named DBs, cross-tab
   Web Lock guard, `navigator.storage.persist()`~~ — **done**.
+- ~~Capability preflight (`FreeholdVault.capabilities()` / `probePrf()` / `probeSah()`) so an
+  unsupported browser gets a clear reason, not a crypto failure deep in the worker~~ — **done**.
+- ~~Non-bypassable recovery-code backup at enroll (`needsBackup()` / `hasRecoveryMethod()` gate the
+  demo's export)~~ — **done**.
+- **Envelope anti-rollback** (`env_generation`, floor-enforced + epoch-bound) so revoking a method is
+  durable against a local rollback of the envelope — **issue #3, format bump to v3**.
+- **DEK rotation + re-encryption**, wired to revocation, so a compromised device can be truly evicted
+  (not just have one unlock slot dropped) — **issue #4**.
+- **Multi-user** (families, small teams, a clinician sharing notes): needs real **per-device signing
+  keys** so one device can't forge another user's epoch (see `docs/sync-epoch-design.md` §D-SE2).
+  Deliberately out of v1 scope — single-user is a *chosen* boundary, not a dead end — **planned**.
+- Published **bundle-format spec + a standalone decryptor** (recovery-code → plaintext SQLite, no
+  Freehold runtime) so "self-custodied" is verifiable and provider-portable — **issue #6**.
 - Publish `@freehold/db` to npm (the SDK lives in `packages/db`). (The bare `freehold` npm name is
   squatted by a dead 2022 package; the scope is ours.)
 - BIP39 checksummed recovery phrases (currently Crockford-Base32).
 - Broader PRF-stability matrix: iCloud Keychain, 1Password, mobile, roaming keys.
 - "Adv Mode": chunk sharding of the encrypted DB across your own devices/peers.
+
+## What sync does and doesn't protect
+
+Freehold protects **confidentiality** from the sync path *unconditionally* — no server, relay, or
+peer ever sees a key or plaintext. It does **not** guarantee **availability or freshness**: a
+dishonest provider can withhold writes, serve a stale version, or partition your devices. The
+anti-rollback epochs make such staleness **detectable and non-propagating** at the sync boundary,
+but they can't force a bad provider to deliver your latest state. For a liveness guarantee, run a
+provider you control or sync device-to-device. See `docs/sync-epoch-design.md` §2.1.
 
 ## License
 

@@ -68,6 +68,10 @@
         return true;
       },
       isSupported: () => FreeholdVault.isSupported(),
+      capabilities: () => FreeholdVault.capabilities(),
+      needsBackup: () => vault.needsBackup(),
+      hasRecoveryMethod: () => vault.hasRecoveryMethod(),
+      listMethods: () => vault.listMethods(),
       enroll: () => vault.enroll().then(() => true),
       addRecoveryCode: (code) => vault.addRecoveryCode(code),
       unlock: () => vault.unlock().then(() => true),

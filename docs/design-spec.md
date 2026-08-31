@@ -360,7 +360,20 @@ partial-rollback prevention the deferred-tree v1 does not provide; see `adversar
   passkey does **zero** file I/O to the encrypted DB. `[High]`
 - **DEK rotation (suspected compromise):** generate DEK′, stream every block (open with DEK, seal
   with DEK′) into a **new** OPFS file, then atomic-swap. Crash-safe via write-new-then-swap;
-  never in-place. Offline/maintenance operation. `[High]`
+  never in-place. Offline/maintenance operation. `[High]` **STATUS: designed, not yet built**
+  (tracked as issue #4). Until it ships, the two notes below bound what "revocation" actually means.
+- **Revoking a method ≠ containing a compromised device.** `remove_slot` drops one KEK-wrapped copy
+  of the DEK; **the DEK itself is unchanged.** A device that was unlocked and then compromised may
+  already hold the DEK in memory — removing its slot does nothing about that. **Genuine eviction of
+  a compromised device requires DEK rotation** (above) so all prior key material becomes useless. A
+  compromised device also remains able to mint valid sync epochs until rotation (it is inside the
+  trust boundary — see [[header-free-encrypted-vfs/sync-epoch-design]] §2.1). `[High]`
+- **Envelope rollback.** The envelope blob is stored in attacker-controllable local storage and (as
+  of format v2) carries **no monotonic generation**, so restoring an older copy silently **re-plants
+  a removed slot** — revocation is not durable against a local rollback of the envelope. The fix is
+  to bring the envelope under the same anti-rollback umbrella as `db_generation`: an `env_generation`
+  counter, floor-enforced locally and bound into the cross-device epoch so a stale envelope cannot
+  propagate (tracked as issue #3; format bump to v3). `[High]`
 
 ---
 

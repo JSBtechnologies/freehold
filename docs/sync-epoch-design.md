@@ -33,6 +33,32 @@ cross-device channel is the user's *other device*.
   fundamental, not an implementation gap. The value is that isolation is the *only* remaining hole,
   and any sync closes it.
 
+## 2.1 Trust-boundary clarifications (read before trusting the guarantee)
+
+Two things the words above are easy to over-read. Both are properties of the model, not bugs.
+
+**Server-blind ≠ sync-provider-trusted — confidentiality is guaranteed, availability and freshness
+are not.** A sync provider (or relay, or malicious peer) *never* sees a key and *cannot* decrypt
+your data — that is unconditional. It can still, however, **withhold your writes, serve you a stale
+version, or partition you from your other devices.** The epoch machinery makes such staleness
+**detectable and non-propagating** at the sync boundary (a peer refuses to accept an epoch older
+than one it has seen) — but it cannot *force* a dishonest provider to deliver your latest state or
+stay reachable. In one line: **Freehold protects confidentiality from the sync path
+unconditionally; availability and freshness are *detectable* but depend on the provider's
+honesty.** If you need a liveness guarantee, run a provider you control, or sync device-to-device.
+
+**A compromised device is inside the trust boundary until the DEK is rotated.** The epoch's
+forge-resistance is stated as "an attacker *without the DEK* cannot forge one" — the flip side is
+that any device that *holds* the DEK (i.e. one you unlocked, then had compromised) **can mint valid
+epochs**, exactly like every other device of yours, until it is evicted. Eviction is **not** just
+`removeMethod()` (that only drops one KEK slot; the DEK is unchanged and the compromised host may
+already hold it, plus a captured older envelope still opens — see the envelope-rollback note in
+[[header-free-encrypted-vfs/design-spec]] §11). **True revocation of a compromised device requires
+DEK rotation + re-encryption** (design-spec §11 / §361). Until that lands as a wired operation
+(currently designed, not built — tracked as issue #4), treat "revoke a method" as *reducing unlock
+surface*, **not** as containing a device that already saw the key. "Next sync catches it" catches
+rolled-back *state*, never a *leaked key*.
+
 ## 3. Trust model — DECISION D-SE1
 **Recommend: peer-to-peer among the user's OWN devices, server-blind. No trusted server in v1.**
 Rationale: it matches the whole thesis and the just-proven result (devices sync directly, no server

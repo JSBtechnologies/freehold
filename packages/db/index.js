@@ -118,12 +118,82 @@ export class FreeholdVault {
     };
   }
 
-  /** WebAuthn + OPFS present? (Does not probe PRF support — that needs a real authenticator.) */
+  /** WebAuthn + OPFS present? (Does not probe PRF support — that needs a real authenticator.)
+   *  Kept for back-compat; prefer capabilities() for a full, reasoned preflight. */
   static isSupported() {
     return typeof navigator !== 'undefined'
       && !!navigator.credentials
       && typeof PublicKeyCredential !== 'undefined'
       && !!(navigator.storage && navigator.storage.getDirectory);
+  }
+
+  /** Full capability preflight. Returns `{ ok, reasons, ...flags }`. Every hard requirement Freehold
+   *  needs to even open a vault is probed *synchronously* here so an unsupported browser gets a clear
+   *  "why" instead of a crypto failure deep in the worker. PRF (the one feature most likely to be
+   *  missing) can't be probed synchronously — use probePrf() for a best-effort async answer.
+   *
+   *  Flags: secureContext, webauthn, opfs (getDirectory), sahpool (SyncAccessHandle), workers, wasm. */
+  static capabilities() {
+    const hasNav = typeof navigator !== 'undefined';
+    const secureContext = typeof isSecureContext === 'undefined' ? false : isSecureContext;
+    const webauthn = hasNav && !!navigator.credentials && typeof PublicKeyCredential !== 'undefined';
+    const opfs = hasNav && !!(navigator.storage && navigator.storage.getDirectory);
+    // SAHPool is the storage floor with no viable fallback. Its method createSyncAccessHandle() is
+    // [Exposed=DedicatedWorker] — absent on the main-thread prototype — so we can only proxy it here
+    // by the presence of the OPFS handle type. The definitive check lives in probeSah() (worker-based).
+    const sahpool = typeof FileSystemFileHandle !== 'undefined';
+    const workers = typeof Worker !== 'undefined';
+    const wasm = typeof WebAssembly !== 'undefined';
+    const reasons = [];
+    if (!secureContext) reasons.push('not a secure context (needs HTTPS or localhost)');
+    if (!webauthn) reasons.push('WebAuthn / navigator.credentials unavailable');
+    if (!opfs) reasons.push('OPFS (navigator.storage.getDirectory) unavailable');
+    if (!sahpool) reasons.push('OPFS file handles unavailable (older browser)');
+    if (!workers) reasons.push('Web Workers unavailable');
+    if (!wasm) reasons.push('WebAssembly unavailable');
+    return {
+      ok: secureContext && webauthn && opfs && sahpool && workers && wasm,
+      secureContext, webauthn, opfs, sahpool, workers, wasm, reasons,
+    };
+  }
+
+  /** Best-effort async probe of WebAuthn-PRF support. Resolves to 'supported' | 'unsupported' |
+   *  'unknown'. Uses PublicKeyCredential.getClientCapabilities() where present (Chrome 133+/newer);
+   *  otherwise 'unknown' — PRF can only be confirmed for certain by enrolling a real authenticator,
+   *  and enroll() surfaces a clean error if the authenticator declines the extension. */
+  static async probePrf() {
+    try {
+      if (typeof PublicKeyCredential === 'undefined') return 'unsupported';
+      if (typeof PublicKeyCredential.getClientCapabilities === 'function') {
+        const caps = await PublicKeyCredential.getClientCapabilities();
+        if (caps && Object.prototype.hasOwnProperty.call(caps, 'extension:prf')) {
+          return caps['extension:prf'] ? 'supported' : 'unsupported';
+        }
+      }
+      return 'unknown';
+    } catch { return 'unknown'; }
+  }
+
+  /** Definitive OPFS SyncAccessHandle probe. createSyncAccessHandle() is worker-only, so this spins
+   *  a throwaway inline worker to check whether the method exists in a DedicatedWorker scope — the
+   *  scope where Freehold's vault actually needs it. Resolves boolean; false ⇒ storage floor unmet
+   *  (no viable fallback). Best-effort: resolves false on any worker/timeout error. */
+  static async probeSah() {
+    if (typeof Worker === 'undefined' || typeof Blob === 'undefined' || typeof URL === 'undefined') return false;
+    const src = "self.postMessage(typeof FileSystemFileHandle !== 'undefined' && " +
+      "typeof FileSystemFileHandle.prototype.createSyncAccessHandle === 'function');";
+    let url;
+    try {
+      url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+      const w = new Worker(url);
+      return await new Promise((resolve) => {
+        const done = (v) => { try { w.terminate(); } catch {} resolve(v); };
+        const t = setTimeout(() => done(false), 3000);
+        w.onmessage = (e) => { clearTimeout(t); done(!!e.data); };
+        w.onerror = () => { clearTimeout(t); done(false); };
+      });
+    } catch { return false; }
+    finally { if (url) { try { URL.revokeObjectURL(url); } catch {} } }
   }
 
   /**
@@ -133,9 +203,17 @@ export class FreeholdVault {
    * `rpName` (optional): WebAuthn relying-party display name.
    * `lockAfterMs` (optional): auto-lock after this many ms of inactivity (rolling; 0/undefined off).
    */
-  static async open({ wasmUrl, workerUrl, rpName, lockAfterMs } = {}) {
+  static async open({ wasmUrl, workerUrl, rpName, lockAfterMs, skipCapabilityCheck } = {}) {
     if (!wasmUrl) {
       throw new Error('FreeholdVault.open: wasmUrl is required (URL of the wasm-pack JS glue, e.g. pkg/freehold.js)');
+    }
+    // CAPABILITY PREFLIGHT: fail fast with a readable reason instead of a crypto/OPFS error deep in
+    // the worker. Opt out with { skipCapabilityCheck: true } only if you probe yourself.
+    if (!skipCapabilityCheck) {
+      const caps = FreeholdVault.capabilities();
+      if (!caps.ok) {
+        throw new Error('Freehold is unsupported in this browser: ' + caps.reasons.join('; '));
+      }
     }
     // TAB-LOCK GUARD: the OPFS SAH pool is exclusive per origin, so a second tab would hit opaque
     // handle-acquisition errors deep in the worker. Claim a Web Lock for the vault's lifetime
@@ -217,6 +295,22 @@ export class FreeholdVault {
   /** Has this device an envelope (via enroll() or importBundle())? */
   async isEnrolled() {
     return !!(await idbGet('envelope'));
+  }
+
+  /** Does the envelope have a device-independent recovery method (an Argon2id recovery-code slot)?
+   *  This is the ONLY unlock that survives losing every device — a passkey slot is bound to an
+   *  authenticator. Used to enforce a backup before setup is considered complete. */
+  async hasRecoveryMethod() {
+    if (!(await this.isEnrolled())) return false;
+    return (await this.listMethods()).some((m) => m.kind === 'recovery');
+  }
+
+  /** Is a backup still owed? True when enrolled but the only way in is this device's passkey(s) —
+   *  i.e. no recovery code exists. Losing/wiping this device in that state = losing the data. The UI
+   *  should refuse to treat enrollment as "done" while this is true. See docs/BUILD-NOTES.md. */
+  async needsBackup() {
+    if (!(await this.isEnrolled())) return false;
+    return !(await this.hasRecoveryMethod());
   }
 
   /** Assert the passkey ONCE and open a session: the DEK stays unwrapped inside the worker's wasm
