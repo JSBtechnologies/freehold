@@ -370,6 +370,13 @@ export class FreeholdVault {
     return this.#call('gen_recovery');
   }
 
+  /** Advisory check: does `code` look like a correctly-transcribed generated recovery code (its
+   *  checksum matches)? Returns false for a typo or a custom (checksum-less) code. Use it to warn in
+   *  the UI before an unlock attempt — do NOT gate unlock on it, since a custom code is still valid. */
+  async checkRecoveryCode(code) {
+    return this.#call('recovery_code_valid', [code]);
+  }
+
   /** Add a recovery-code unlock method (generating a code if none given). Requires a passkey
    *  assertion to authorize. Resolves to the code — show it ONCE, then forget it. */
   async addRecoveryCode(code) {

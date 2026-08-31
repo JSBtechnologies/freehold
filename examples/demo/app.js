@@ -126,6 +126,10 @@ $('rec-go').onclick = guard(async () => {
   const code = $('rec-input').value.trim();
   $('rec-dialog').close();
   if (!code) return;
+  // Advisory: warn on a likely-mistyped generated code, but still attempt (custom codes are valid).
+  if (!(await vault.checkRecoveryCode(code))) {
+    log('recovery code checksum did not match (a typo, or a custom code) — trying anyway', 'warn');
+  }
   await vault.unlockWithRecovery(code);
   log('unlocked with recovery code', 'ok');
 });

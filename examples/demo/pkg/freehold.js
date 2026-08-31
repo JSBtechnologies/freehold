@@ -138,6 +138,20 @@ export function list_methods(blob) {
 }
 
 /**
+ * Advisory: does `code` parse as a generated recovery code whose checksum matches (likely typed
+ * correctly)? False for a typo or a custom (checksum-less) code. The UI uses it to warn before an
+ * unlock attempt; it is NOT an unlock gate — a custom code is still a valid key.
+ * @param {string} code
+ * @returns {boolean}
+ */
+export function recovery_code_valid(code) {
+    const ptr0 = passStringToWasm0(code, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.recovery_code_valid(ptr0, len0);
+    return ret !== 0;
+}
+
+/**
  * Revoke a method by its kek_id. Requires the current passkey's PRF to authorize (revoking is a
  * mutation that re-MACs the envelope under the DEK — v3). Returns the new blob. Refuses to remove
  * the last slot.
@@ -853,7 +867,7 @@ function __wbg_get_imports() {
             return ret;
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 697, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 700, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__ha22148a4a7c1d5ff);
             return ret;
         },

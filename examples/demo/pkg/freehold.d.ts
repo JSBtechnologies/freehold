@@ -43,6 +43,13 @@ export function import_bundle(bytes: Uint8Array): Promise<any>;
 export function list_methods(blob: Uint8Array): string;
 
 /**
+ * Advisory: does `code` parse as a generated recovery code whose checksum matches (likely typed
+ * correctly)? False for a typo or a custom (checksum-less) code. The UI uses it to warn before an
+ * unlock attempt; it is NOT an unlock gate — a custom code is still a valid key.
+ */
+export function recovery_code_valid(code: string): boolean;
+
+/**
  * Revoke a method by its kek_id. Requires the current passkey's PRF to authorize (revoking is a
  * mutation that re-MACs the envelope under the DEK — v3). Returns the new blob. Refuses to remove
  * the last slot.
@@ -148,6 +155,7 @@ export interface InitOutput {
     readonly gen_recovery: () => [number, number, number, number];
     readonly import_bundle: (a: number, b: number) => any;
     readonly list_methods: (a: number, b: number) => [number, number, number, number];
+    readonly recovery_code_valid: (a: number, b: number) => number;
     readonly remove_method: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly rotate_dek: (a: number, b: number, c: number, d: number) => any;
     readonly run_tests: () => any;

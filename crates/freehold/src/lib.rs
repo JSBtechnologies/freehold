@@ -973,6 +973,31 @@ async fn run() -> std::result::Result<String, String> {
             "M3b. envelope v3 anti-rollback: gen {gen_before}→{gen_after} monotonic | stale copy REFUSED by floor | forged-gen copy fails MAC (Tamper), no leak\n"
         ));
 
+        // ---- M3d (recovery-code checksum, issue #1): a generated code self-verifies; a single-symbol
+        // typo is caught; a custom (checksum-less) code reads as unverified. Advisory only — never gates
+        // unlock — but it must round-trip and reject typos (the standalone decryptor mirrors this).
+        {
+            let code = envelope::generate_recovery_code().map_err(|e| format!("M3d: gen: {e:?}"))?;
+            if !envelope::verify_recovery_checksum(&code) {
+                return Err(format!("M3d: freshly generated code failed its own checksum ({code})"));
+            }
+            if !envelope::verify_recovery_checksum(&code.to_lowercase().replace('-', " ")) {
+                return Err("M3d: checksum not robust to case/hyphen/space normalization".into());
+            }
+            // Flip the first payload symbol; the checksum must reject it.
+            let mut b = code.clone().into_bytes();
+            let i = b.iter().position(|&c| c != b'-').unwrap();
+            b[i] = if b[i] == b'0' { b'1' } else { b'0' };
+            let typo = String::from_utf8(b).unwrap();
+            if typo != code && envelope::verify_recovery_checksum(&typo) {
+                return Err(format!("M3d: a single-symbol typo passed the checksum ({code} -> {typo})"));
+            }
+            if envelope::verify_recovery_checksum("not a generated code") {
+                return Err("M3d: a custom/garbage code falsely verified".into());
+            }
+            r.push_str("M3d. recovery-code checksum: generated code self-verifies (case/space tolerant) | single-symbol typo caught | custom code reads as unverified\n");
+        }
+
         // ---- M3c (DEK rotation — envelope half, issue #4 / D-RK1) ------------------------------------
         // Rotate the CURRENT envelope (opens under passkey-B / recovery `code`, DEK = DEK_OK) to a
         // FRESH dek', keeping ONLY the presenting passkey (prf_b) + a newly minted recovery code. This
@@ -2215,6 +2240,14 @@ fn hex_to_bytes(s: &str) -> std::result::Result<Vec<u8>, String> {
 #[wasm_bindgen]
 pub fn gen_recovery() -> Result<String, JsValue> {
     envelope::generate_recovery_code().map_err(|e| JsValue::from_str(&format!("{e:?}")))
+}
+
+/// Advisory: does `code` parse as a generated recovery code whose checksum matches (likely typed
+/// correctly)? False for a typo or a custom (checksum-less) code. The UI uses it to warn before an
+/// unlock attempt; it is NOT an unlock gate — a custom code is still a valid key.
+#[wasm_bindgen]
+pub fn recovery_code_valid(code: &str) -> bool {
+    envelope::verify_recovery_checksum(code)
 }
 
 /// Add a recovery-code method: unlock the DEK with the current passkey's PRF, then wrap it under the

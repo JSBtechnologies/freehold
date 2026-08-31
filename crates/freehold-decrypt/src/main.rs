@@ -29,6 +29,12 @@ fn main() -> ExitCode {
         }
     };
 
+    // Advisory only: warn on a likely-mistyped generated code, but still attempt (a custom code has
+    // no checksum yet is a valid key — never gate decryption on this).
+    if !freehold_decrypt::verify_recovery_checksum(recovery_code) {
+        eprintln!("note: recovery code checksum did not match (a typo, or a custom code) — trying anyway");
+    }
+
     let dbs = match freehold_decrypt::recover(&bytes, recovery_code) {
         Ok(d) => d,
         Err(e) => {

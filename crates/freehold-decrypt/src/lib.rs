@@ -320,6 +320,46 @@ pub fn recover(bundle_bytes: &[u8], recovery_code: &str) -> Result<Vec<Recovered
 /// The 16-byte SQLite file magic (`"SQLite format 3\0"`) — a decrypted image must start with this.
 pub const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 
+// ---- recovery-code checksum (bit-identical to envelope.rs's `verify_recovery_checksum`) ----
+const RECOVERY_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ"; // Crockford (no I,L,O,U)
+const RECOVERY_PAYLOAD_LEN: usize = 26;
+const RECOVERY_CHECK_LEN: usize = 4;
+
+fn recovery_checksum(payload: &str) -> String {
+    let h = Sha256::digest(payload.as_bytes());
+    let (mut acc, mut bits, mut out) = (0u32, 0u32, String::new());
+    for &b in h.iter() {
+        acc = (acc << 8) | b as u32;
+        bits += 8;
+        while bits >= 5 && out.len() < RECOVERY_CHECK_LEN {
+            bits -= 5;
+            out.push(RECOVERY_ALPHABET[((acc >> bits) & 0x1f) as usize] as char);
+        }
+        if out.len() == RECOVERY_CHECK_LEN {
+            break;
+        }
+    }
+    out
+}
+
+/// Advisory: does `code` parse as a generated recovery code whose checksum matches (i.e. it was very
+/// likely transcribed correctly)? False for a typo or a custom (checksum-less) code. The CLI uses this
+/// only to warn — a custom code with no checksum is still a valid key and decryption is still attempted.
+pub fn verify_recovery_checksum(code: &str) -> bool {
+    let canon: String = code
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .flat_map(|c| c.to_uppercase())
+        .collect();
+    if canon.len() != RECOVERY_PAYLOAD_LEN + RECOVERY_CHECK_LEN
+        || !canon.bytes().all(|b| RECOVERY_ALPHABET.contains(&b))
+    {
+        return false;
+    }
+    let (payload, check) = canon.split_at(RECOVERY_PAYLOAD_LEN);
+    recovery_checksum(payload) == check
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,5 +411,22 @@ mod tests {
         let mut bad = GOLDEN.to_vec();
         bad[0] ^= 0xff;
         assert!(matches!(recover(&bad, CODE), Err(Error::Bundle(_))));
+    }
+
+    #[test]
+    fn recovery_checksum_round_trips_and_catches_typos() {
+        // Build a well-formed generated code: 26-symbol payload + its checksum, grouped in 5s.
+        let payload = "0123456789ABCDEFGHJKMNPQRS"; // 26 Crockford symbols
+        let full = format!("{payload}{}", recovery_checksum(payload));
+        let grouped = full.as_bytes().chunks(5).map(|c| std::str::from_utf8(c).unwrap()).collect::<Vec<_>>().join("-");
+        assert!(verify_recovery_checksum(&grouped), "correct code must verify");
+        assert!(verify_recovery_checksum(&grouped.to_lowercase()), "case-insensitive");
+        // Flip one payload symbol → checksum must reject it.
+        let mut bytes = grouped.into_bytes();
+        let i = bytes.iter().position(|&b| b == b'A').unwrap();
+        bytes[i] = b'B';
+        assert!(!verify_recovery_checksum(std::str::from_utf8(&bytes).unwrap()), "a single typo must fail");
+        // A custom (checksum-less) code — like the fixture's — is not a generated code, so false.
+        assert!(!verify_recovery_checksum(CODE));
     }
 }

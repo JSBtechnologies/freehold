@@ -242,12 +242,65 @@ pub fn random_dek() -> Result<Zeroizing<[u8; DEK_LEN]>, EnvelopeError> {
     Ok(dek)
 }
 
-/// Generate a high-entropy (128-bit) recovery code, Crockford-Base32, grouped for transcription.
-/// NOTE: a production build should prefer a BIP39 checksummed word list (threat-model B); this
-/// prototype uses Base32 to avoid a heavier wasm dependency — the KEK derivation is identical
-/// either way (Argon2id over the normalized string).
+const RECOVERY_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ"; // Crockford (no I,L,O,U)
+/// A generated recovery code is `RECOVERY_PAYLOAD_LEN` entropy symbols + `RECOVERY_CHECK_LEN` check
+/// symbols (SHA-256 derived), grouped in 5s. 128 bits of entropy → 26 payload symbols.
+const RECOVERY_PAYLOAD_LEN: usize = 26;
+const RECOVERY_CHECK_LEN: usize = 4; // 20-bit checksum ⇒ a single-symbol transcription error slips ≈2⁻²⁰
+
+/// The `RECOVERY_CHECK_LEN`-symbol Crockford checksum of a payload symbol run — first bits of
+/// SHA-256(payload). Deterministic and self-contained (no dependency); the standalone decryptor and
+/// the SDK reproduce it identically to validate a typed code before spending an Argon2 pass. This is
+/// NOT a MAC: it detects accidental transcription errors, not adversarial tampering (an attacker with
+/// a candidate code can trivially recompute it) — the DEK-keyed envelope MAC is the tamper authority.
+fn recovery_checksum(payload: &str) -> String {
+    let h = <Sha256 as sha2::Digest>::digest(payload.as_bytes());
+    let mut acc = 0u32;
+    let mut bits = 0u32;
+    let mut out = String::new();
+    for &b in h.iter() {
+        acc = (acc << 8) | b as u32;
+        bits += 8;
+        while bits >= 5 && out.len() < RECOVERY_CHECK_LEN {
+            bits -= 5;
+            out.push(RECOVERY_ALPHABET[((acc >> bits) & 0x1f) as usize] as char);
+        }
+        if out.len() == RECOVERY_CHECK_LEN {
+            break;
+        }
+    }
+    out
+}
+
+/// Canonicalize a typed recovery code to its bare symbol run: strip grouping hyphens + whitespace and
+/// upper-case. (KEK derivation uses its own normalization and is intentionally NOT changed here.)
+fn recovery_canon(code: &str) -> String {
+    code.chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .flat_map(|c| c.to_uppercase())
+        .collect()
+}
+
+/// True if `code` is a well-formed generated recovery code whose checksum matches — i.e. it was very
+/// likely transcribed correctly. Returns false for a typo AND for a caller-supplied custom code (which
+/// carries no checksum); callers use it as an ADVISORY pre-check, never as an unlock gate (a custom
+/// code is still a valid key). Mirrored bit-for-bit in the standalone decryptor + the SDK.
+pub fn verify_recovery_checksum(code: &str) -> bool {
+    let canon = recovery_canon(code);
+    if canon.len() != RECOVERY_PAYLOAD_LEN + RECOVERY_CHECK_LEN
+        || !canon.bytes().all(|b| RECOVERY_ALPHABET.contains(&b))
+    {
+        return false;
+    }
+    let (payload, check) = canon.split_at(RECOVERY_PAYLOAD_LEN);
+    recovery_checksum(payload) == check
+}
+
+/// Generate a high-entropy (128-bit) recovery code, Crockford-Base32, with a trailing checksum group,
+/// grouped for transcription. The checksum lets the UI / decryptor catch a mistyped code up front
+/// (see `verify_recovery_checksum`); it adds no entropy and does not change the KEK contract (Argon2id
+/// over the normalized string). No dependency — the alphabet + SHA-256 are already in the core.
 pub fn generate_recovery_code() -> Result<String, EnvelopeError> {
-    const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ"; // Crockford (no I,L,O,U)
     let mut ent = [0u8; 16];
     getrandom::getrandom(&mut ent).map_err(|_| EnvelopeError::Rng)?;
     let mut chars = String::new();
@@ -259,13 +312,14 @@ pub fn generate_recovery_code() -> Result<String, EnvelopeError> {
         bits += 8;
         while bits >= 5 {
             bits -= 5;
-            chars.push(ALPHABET[((acc >> bits) & 0x1f) as usize] as char);
+            chars.push(RECOVERY_ALPHABET[((acc >> bits) & 0x1f) as usize] as char);
         }
     }
     if bits > 0 {
-        chars.push(ALPHABET[((acc << (5 - bits)) & 0x1f) as usize] as char);
+        chars.push(RECOVERY_ALPHABET[((acc << (5 - bits)) & 0x1f) as usize] as char);
     }
-    // Group into 5-char blocks: XXXXX-XXXXX-...
+    // Append the checksum symbols over the payload, then group everything into 5-char blocks.
+    chars.push_str(&recovery_checksum(&chars));
     let grouped = chars
         .as_bytes()
         .chunks(5)
