@@ -52,9 +52,10 @@ forge-resistance is stated as "an attacker *without the DEK* cannot forge one" �
 that any device that *holds* the DEK (i.e. one you unlocked, then had compromised) **can mint valid
 epochs**, exactly like every other device of yours, until it is evicted. Eviction is **not** just
 `removeMethod()` (that only drops one KEK slot; the DEK is unchanged and the compromised host may
-already hold it, plus a captured older envelope still opens — see the envelope-rollback note in
-[[header-free-encrypted-vfs/design-spec]] §11). **True revocation of a compromised device requires
-DEK rotation + re-encryption** (design-spec §11 / §361). Until that lands as a wired operation
+already hold it, a captured older envelope is now refused locally by the v3 generation floor, but the DEK is
+unchanged — see the envelope-rollback note in [[header-free-encrypted-vfs/design-spec]] §11).
+**True revocation of a compromised device requires DEK rotation + re-encryption** (design-spec §11 /
+§361). Until that lands as a wired operation
 (currently designed, not built — tracked as issue #4), treat "revoke a method" as *reducing unlock
 surface*, **not** as containing a device that already saw the key. "Next sync catches it" catches
 rolled-back *state*, never a *leaked key*.

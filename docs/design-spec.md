@@ -368,12 +368,16 @@ partial-rollback prevention the deferred-tree v1 does not provide; see `adversar
   a compromised device requires DEK rotation** (above) so all prior key material becomes useless. A
   compromised device also remains able to mint valid sync epochs until rotation (it is inside the
   trust boundary — see [[header-free-encrypted-vfs/sync-epoch-design]] §2.1). `[High]`
-- **Envelope rollback.** The envelope blob is stored in attacker-controllable local storage and (as
-  of format v2) carries **no monotonic generation**, so restoring an older copy silently **re-plants
-  a removed slot** — revocation is not durable against a local rollback of the envelope. The fix is
-  to bring the envelope under the same anti-rollback umbrella as `db_generation`: an `env_generation`
-  counter, floor-enforced locally and bound into the cross-device epoch so a stale envelope cannot
-  propagate (tracked as issue #3; format bump to v3). `[High]`
+- **Envelope rollback (v3 — issue #3, local half shipped).** The envelope blob lives in
+  attacker-controllable local storage, so restoring an older copy would silently **re-plant a removed
+  slot**. Envelope **v3** brings it under the same anti-rollback umbrella as `db_generation`: a
+  monotonic `env_generation` (bumped on every add/remove), authenticated by a **DEK-keyed HMAC** over
+  the whole envelope so a forged higher generation can't open (fails as `Tamper`), plus a **floor**
+  the SDK persists and enforces (`envelope_generation` / `check_fresh`) — a genuine older copy is
+  refused (`Rollback`). Locally the floor is a backstop (an attacker who rewrites all storage rewrites
+  it too), exactly as with the DB anchor. **Remaining (#3c):** bind `env_generation` into the sync
+  epoch so a stale envelope is *prevented from propagating* cross-device, not just detected locally.
+  Revoke is now a DEK-authorized op (it re-MACs). `[High]`
 
 ---
 

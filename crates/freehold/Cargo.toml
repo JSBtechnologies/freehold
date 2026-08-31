@@ -45,6 +45,7 @@ thiserror = "2"
 chacha20poly1305 = "0.10"   # XChaCha20-Poly1305 AEAD (24-byte nonce) — design-spec §5
 hkdf = "0.12"               # HKDF-SHA256 subkey derivation — §17.E (single-domain in M1)
 sha2 = "0.10"               # SHA-256 for HKDF + file_id
+hmac = "0.12"               # HMAC-SHA256 envelope authenticator (v3 anti-rollback) — RustCrypto
 zeroize = "1"               # Zeroizing scratch buffers / DEK — §17.M
 getrandom = { version = "0.2", features = ["js"] }  # CSPRNG (crypto.getRandomValues) — §8/§17.F
 argon2 = "0.5"              # Argon2id KDF for the recovery-code KEK (M3 envelope) — RustCrypto

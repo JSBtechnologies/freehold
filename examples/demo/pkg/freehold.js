@@ -60,6 +60,20 @@ export function enroll(prf) {
 }
 
 /**
+ * The envelope's anti-rollback generation counter (v3). The SDK persists the max it has seen as a
+ * floor and refuses any envelope below it — catching a rolled-back envelope that would re-plant a
+ * revoked slot. Returned as f64 (generations are small; exact through 2^53).
+ * @param {Uint8Array} blob
+ * @returns {number}
+ */
+export function envelope_generation(blob) {
+    const ptr0 = passArray8ToWasm0(blob, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.envelope_generation(ptr0, len0);
+    return ret;
+}
+
+/**
  * Generate a fresh recovery code for the user to write down.
  * @returns {string}
  */
@@ -124,21 +138,26 @@ export function list_methods(blob) {
 }
 
 /**
- * Revoke a method by its kek_id. Returns the new blob. Refuses to remove the last slot.
+ * Revoke a method by its kek_id. Requires the current passkey's PRF to authorize (revoking is a
+ * mutation that re-MACs the envelope under the DEK — v3). Returns the new blob. Refuses to remove
+ * the last slot.
+ * @param {Uint8Array} existing_prf
  * @param {number} kek_id
  * @param {Uint8Array} blob
  * @returns {Uint8Array}
  */
-export function remove_method(kek_id, blob) {
-    const ptr0 = passArray8ToWasm0(blob, wasm.__wbindgen_malloc);
+export function remove_method(existing_prf, kek_id, blob) {
+    const ptr0 = passArray8ToWasm0(existing_prf, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.remove_method(kek_id, ptr0, len0);
+    const ptr1 = passArray8ToWasm0(blob, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.remove_method(ptr0, len0, kek_id, ptr1, len1);
     if (ret[3]) {
         throw takeFromExternrefTable0(ret[2]);
     }
-    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-    return v2;
+    return v3;
 }
 
 /**
@@ -811,7 +830,7 @@ function __wbg_get_imports() {
             return ret;
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 686, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 691, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__ha22148a4a7c1d5ff);
             return ret;
         },

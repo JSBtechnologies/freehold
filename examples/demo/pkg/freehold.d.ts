@@ -18,6 +18,13 @@ export function add_recovery(existing_prf: Uint8Array, code: string, blob: Uint8
 export function enroll(prf: Uint8Array): Promise<Uint8Array>;
 
 /**
+ * The envelope's anti-rollback generation counter (v3). The SDK persists the max it has seen as a
+ * floor and refuses any envelope below it — catching a rolled-back envelope that would re-plant a
+ * revoked slot. Returned as f64 (generations are small; exact through 2^53).
+ */
+export function envelope_generation(blob: Uint8Array): number;
+
+/**
  * Generate a fresh recovery code for the user to write down.
  */
 export function gen_recovery(): string;
@@ -36,9 +43,11 @@ export function import_bundle(bytes: Uint8Array): Promise<any>;
 export function list_methods(blob: Uint8Array): string;
 
 /**
- * Revoke a method by its kek_id. Returns the new blob. Refuses to remove the last slot.
+ * Revoke a method by its kek_id. Requires the current passkey's PRF to authorize (revoking is a
+ * mutation that re-MACs the envelope under the DEK — v3). Returns the new blob. Refuses to remove
+ * the last slot.
  */
-export function remove_method(kek_id: number, blob: Uint8Array): Uint8Array;
+export function remove_method(existing_prf: Uint8Array, kek_id: number, blob: Uint8Array): Uint8Array;
 
 export function run_tests(): Promise<string>;
 
@@ -125,10 +134,11 @@ export interface InitOutput {
     readonly add_passkey: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly add_recovery: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly enroll: (a: number, b: number) => any;
+    readonly envelope_generation: (a: number, b: number) => number;
     readonly gen_recovery: () => [number, number, number, number];
     readonly import_bundle: (a: number, b: number) => any;
     readonly list_methods: (a: number, b: number) => [number, number, number, number];
-    readonly remove_method: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly remove_method: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly run_tests: () => any;
     readonly session_active: () => number;
     readonly session_export: (a: number, b: number) => [number, number, number, number];

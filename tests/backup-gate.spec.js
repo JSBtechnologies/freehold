@@ -51,5 +51,20 @@ test('backup gate: enroll owes a backup until a recovery code is added', async (
   expect(await page.evaluate(() => window.FH.hasRecoveryMethod())).toBe(true);
   expect(await page.evaluate(() => window.FH.needsBackup())).toBe(false);
 
+  // Add a second passkey, then revoke it. In envelope v3 revoke is PRF-authorized and re-MACs the
+  // envelope under the DEK — this drives the full SDK→worker→wasm remove_method path with a passkey
+  // assertion, and proves the surviving methods still open. (Regression for the v3 signature change.)
+  const before = await page.evaluate(() => window.FH.listMethods());
+  await page.evaluate(() => window.FH.addPasskey());
+  const withExtra = await page.evaluate(() => window.FH.listMethods());
+  expect(withExtra.length).toBe(before.length + 1);
+  const victim = withExtra.find((m) => !before.some((b) => b.kekId === m.kekId));
+  await page.evaluate((k) => window.FH.removeMethod(k), victim.kekId);
+  const afterRevoke = await page.evaluate(() => window.FH.listMethods());
+  expect(afterRevoke.length).toBe(before.length);
+  // Recovery still opens after all the churn — the DEK never changed, just its wraps.
+  await page.evaluate((c) => window.FH.unlockWithRecovery(c), code);
+  expect(await page.evaluate(() => window.FH.isUnlocked())).toBe(true);
+
   await ctx.close();
 });

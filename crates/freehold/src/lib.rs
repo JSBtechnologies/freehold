@@ -674,7 +674,9 @@ async fn run() -> std::result::Result<String, String> {
             return Err("M3 envelope: WRONG RECOVERY CODE UNLOCKED THE DEK!".into());
         }
         let n_before = envelope::slot_infos(&env).len();
-        env = envelope::remove_slot(&env, 0).map_err(|e| format!("M3 remove slot 0: {e:?}"))?; // revoke passkey-A
+        let env_before_revoke = env.clone(); // stale copy still holding passkey-A — used below (rollback)
+        let gen_before = envelope::envelope_generation(&env);
+        env = envelope::remove_slot(&env, &DEK_OK, 0).map_err(|e| format!("M3 remove slot 0: {e:?}"))?; // revoke passkey-A
         let n_after = envelope::slot_infos(&env).len();
         if envelope::open_with_prf(&env, &prf_ok).is_ok() {
             return Err("M3 envelope: REVOKED passkey-A still unlocks!".into());
@@ -683,6 +685,39 @@ async fn run() -> std::result::Result<String, String> {
         envelope::open_with_recovery(&env, &code).map_err(|_| "M3 envelope: recovery broke after removing A".to_string())?;
         r.push_str(&format!(
             "M3. N-KEK envelope: 2 passkeys + recovery all recover 1 DEK | wrong code rejected | revoke A ({n_before}→{n_after} slots) leaves B+recovery working\n"
+        ));
+
+        // ---- M3b (envelope v3 anti-rollback, issue #3): generation + MAC ----------------------------
+        // (a) mutations bump the generation monotonically; the floor rejects a rolled-back envelope.
+        let gen_after = envelope::envelope_generation(&env);
+        if !(gen_after > gen_before && gen_before >= 1) {
+            return Err(format!("M3b: generation did not advance ({gen_before} → {gen_after})"));
+        }
+        // check_fresh: the CURRENT envelope clears its own generation as floor; the STALE pre-revoke
+        // copy (which still carries revoked passkey-A) is refused against that same floor.
+        envelope::check_fresh(&env, gen_after).map_err(|e| format!("M3b: fresh envelope refused: {e:?}"))?;
+        match envelope::check_fresh(&env_before_revoke, gen_after) {
+            Err(envelope::EnvelopeError::Rollback) => {}
+            other => return Err(format!("M3b: rolled-back envelope NOT refused by floor: {other:?}")),
+        }
+        // The rolled-back copy is still internally valid (its passkey-A opens it) — proving the floor,
+        // not the crypto, is what defeats the rollback. Belt-and-braces that the attack is real:
+        if envelope::open_with_prf(&env_before_revoke, &prf_ok).is_err() {
+            return Err("M3b: stale copy unexpectedly unopenable — test setup wrong".into());
+        }
+        // (b) MAC tamper: forge a higher generation onto the stale copy to beat the floor. Without the
+        // DEK the attacker cannot re-MAC, so the forged envelope must fail to OPEN (Tamper), not leak.
+        let mut forged = env_before_revoke.clone();
+        forged[28..36].copy_from_slice(&(gen_after + 100).to_le_bytes()); // GEN_OFF..+8
+        if envelope::check_fresh(&forged, gen_after).is_err() {
+            return Err("M3b: forged-generation copy should PASS the floor (that's the point)".into());
+        }
+        match envelope::open_with_prf(&forged, &prf_ok) {
+            Err(envelope::EnvelopeError::Tamper) => {}
+            other => return Err(format!("M3b: forged-generation envelope opened without Tamper: {other:?}")),
+        }
+        r.push_str(&format!(
+            "M3b. envelope v3 anti-rollback: gen {gen_before}→{gen_after} monotonic | stale copy REFUSED by floor | forged-gen copy fails MAC (Tamper), no leak\n"
         ));
     }
 
@@ -1879,11 +1914,26 @@ pub fn add_passkey(existing_prf: &[u8], new_prf: &[u8], blob: &[u8]) -> Result<V
     go().map_err(|e| JsValue::from_str(&e))
 }
 
-/// Revoke a method by its kek_id. Returns the new blob. Refuses to remove the last slot.
+/// Revoke a method by its kek_id. Requires the current passkey's PRF to authorize (revoking is a
+/// mutation that re-MACs the envelope under the DEK — v3). Returns the new blob. Refuses to remove
+/// the last slot.
 #[wasm_bindgen]
-pub fn remove_method(kek_id: u8, blob: &[u8]) -> Result<Vec<u8>, JsValue> {
-    envelope::remove_slot(blob, kek_id)
-        .map_err(|e| JsValue::from_str(&format!("remove_slot: {e:?} (cannot remove the last method)")))
+pub fn remove_method(existing_prf: &[u8], kek_id: u8, blob: &[u8]) -> Result<Vec<u8>, JsValue> {
+    let go = || -> std::result::Result<Vec<u8>, String> {
+        let dek = envelope::open_with_prf(blob, existing_prf)
+            .map_err(|_| "current passkey did not unlock — cannot revoke a method".to_string())?;
+        envelope::remove_slot(blob, &dek, kek_id)
+            .map_err(|e| format!("remove_slot: {e:?} (cannot remove the last method)"))
+    };
+    go().map_err(|e| JsValue::from_str(&e))
+}
+
+/// The envelope's anti-rollback generation counter (v3). The SDK persists the max it has seen as a
+/// floor and refuses any envelope below it — catching a rolled-back envelope that would re-plant a
+/// revoked slot. Returned as f64 (generations are small; exact through 2^53).
+#[wasm_bindgen]
+pub fn envelope_generation(blob: &[u8]) -> f64 {
+    envelope::envelope_generation(blob) as f64
 }
 
 /// List the envelope's unlock methods as `kek_id:kind` pairs, comma-separated (kind: passkey|recovery).

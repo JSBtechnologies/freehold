@@ -266,7 +266,25 @@ export class FreeholdVault {
   async #envelope() {
     const e = await idbGet('envelope');
     if (!e) throw new Error('not enrolled on this device — call enroll() or importBundle() first');
+    // ANTI-ROLLBACK (issue #3): refuse an envelope whose generation is below the highest we've seen.
+    // Catches a rolled-back envelope that would re-plant a revoked slot. Locally the floor is a
+    // backstop (an attacker who rewrites all storage rewrites it too); the wasm MAC additionally
+    // stops a forged higher generation. `env_floor` is a plain Number (generations are small).
+    const floor = await idbGet('env_floor');
+    if (typeof floor === 'number') {
+      const gen = await this.#call('envelope_generation', [e]);
+      if (gen < floor) {
+        throw new Error(`envelope rollback detected (generation ${gen} < floor ${floor}) — refusing a stale envelope`);
+      }
+    }
     return e;
+  }
+
+  // Record the newest envelope generation we've accepted, so a later rollback is caught by #envelope().
+  async #bumpFloor(envelope) {
+    const gen = await this.#call('envelope_generation', [envelope]);
+    const floor = await idbGet('env_floor');
+    if (typeof floor !== 'number' || gen > floor) await idbSet('env_floor', gen);
   }
   async #epoch() {
     return (await idbGet('epoch')) || new Uint8Array(0);
@@ -289,6 +307,8 @@ export class FreeholdVault {
     await idbSet('envelope', envelope);
     await idbSet('credId', credId);
     await idbDel('epoch');
+    await idbDel('env_floor');      // fresh vault — clear any stale floor, then seed from gen 1
+    await this.#bumpFloor(envelope);
     return { credId };
   }
 
@@ -359,6 +379,7 @@ export class FreeholdVault {
     const next = await this.#call('add_recovery', [prf, c, envelope], [prf.buffer]);
     prf = null;
     await idbSet('envelope', next);
+    await this.#bumpFloor(next);
     return c;
   }
 
@@ -371,13 +392,19 @@ export class FreeholdVault {
     const next = await this.#call('add_passkey', [existing, fresh, envelope], [existing.buffer, fresh.buffer]);
     existing = null; fresh = null;
     await idbSet('envelope', next);
+    await this.#bumpFloor(next);
     return { credId: newCredId };
   }
 
-  /** Revoke an unlock method by kekId. Refuses to remove the last one. */
+  /** Revoke an unlock method by kekId. Requires a passkey assertion to authorize (v3: revoking
+   *  re-MACs the envelope under the DEK). Refuses to remove the last one. */
   async removeMethod(kekId) {
-    const next = await this.#call('remove_method', [kekId, await this.#envelope()]);
+    const envelope = await this.#envelope();
+    let prf = await this.#prf();
+    const next = await this.#call('remove_method', [prf, kekId, envelope], [prf.buffer]);
+    prf = null;
     await idbSet('envelope', next);
+    await this.#bumpFloor(next);
   }
 
   /** List unlock methods as [{ kekId, kind }] (kind: 'passkey' | 'recovery'). */
@@ -424,6 +451,10 @@ export class FreeholdVault {
     await idbSet('envelope', meta.envelope);
     if (meta.credId && meta.credId.length) await idbSet('credId', meta.credId);
     if (meta.epoch && meta.epoch.length) await idbSet('epoch', meta.epoch); else await idbDel('epoch');
+    // ADOPT the imported envelope's generation as the new floor: an import is an explicit re-baseline
+    // of THIS device from a trusted bundle of yours. The local floor guards this device's own envelope
+    // timeline against silent rollback; cross-device envelope ordering is epoch-bound separately (#3c).
+    await idbSet('env_floor', await this.#call('envelope_generation', [meta.envelope]));
     return meta;
   }
 
@@ -535,6 +566,7 @@ export class FreeholdVault {
     await idbDel('envelope');
     await idbDel('credId');
     await idbDel('epoch');
+    await idbDel('env_floor');
     // Forget sync lineage too (the DB is being forgotten). deviceId is kept — it's a stable identity.
     await idbDel('syncVv');
     await idbDel('syncCursor');

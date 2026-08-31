@@ -8,7 +8,7 @@ let wasm = null;
 // Ops the main thread may invoke — a fixed allowlist, NOT arbitrary property lookup on the module.
 const OPS = new Set([
   'enroll', 'gen_recovery', 'add_recovery', 'add_passkey', 'remove_method', 'list_methods',
-  'import_bundle',
+  'envelope_generation', 'import_bundle',
   'session_open', 'session_open_recovery', 'session_lock', 'session_active',
   'session_sql', 'session_export',
   // Freehold Sync (freehold-sync-design §10 item 3): crypto + conflict logic in wasm; the loop in JS.

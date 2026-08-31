@@ -140,8 +140,10 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
         del.textContent = 'revoke'; del.className = 'danger';
         del.onclick = async () => {
           try {
-            await vault.removeMethod(kekId); await refreshMethods();
-            log(`Revoked slot ${kekId}. That method can no longer open the DB; the others still can.`, 'ok');
+            log(`Approve your passkey to authorize revoking slot ${kekId} (revoke re-seals the envelope)…`);
+            await vault.removeMethod(kekId); await refreshMethods(); await syncButtons();
+            log(`Revoked slot ${kekId}. That method can no longer open the DB; the others still can. ` +
+                `(The envelope's anti-rollback generation advanced, so restoring the old one is refused.)`, 'ok');
           } catch (e) { log('Revoke failed: ' + e.message, 'err'); }
         };
         li.append(label, del); ul.append(li);

@@ -114,8 +114,10 @@ audited — don't bet lives on it.
   unsupported browser gets a clear reason, not a crypto failure deep in the worker~~ — **done**.
 - ~~Non-bypassable recovery-code backup at enroll (`needsBackup()` / `hasRecoveryMethod()` gate the
   demo's export)~~ — **done**.
-- **Envelope anti-rollback** (`env_generation`, floor-enforced + epoch-bound) so revoking a method is
-  durable against a local rollback of the envelope — **issue #3, format bump to v3**.
+- ~~**Envelope anti-rollback** (v3: `env_generation` + DEK-keyed HMAC + SDK-enforced floor) so a
+  rolled-back envelope can't re-plant a revoked slot; revoke is now DEK-authorized~~ — **done
+  (issue #3, local half)**. Remaining: bind the generation into the sync epoch for cross-device
+  *prevention*, not just local detection — **issue #3c**.
 - **DEK rotation + re-encryption**, wired to revocation, so a compromised device can be truly evicted
   (not just have one unlock slot dropped) — **issue #4**.
 - **Multi-user** (families, small teams, a clinician sharing notes): needs real **per-device signing
