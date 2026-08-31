@@ -2480,12 +2480,14 @@ unsafe fn query_json_params(
 
 struct Session {
     util: OpfsSAHPoolUtil,
-    /// The envelope blob the session was opened with — non-secret ciphertext, retained so
-    /// `session_export` can embed it in the bundle without a re-prompt.
-    envelope: Vec<u8>,
     /// Open connection per named DB file ("<name>.db"), all closed on lock.
     handles: HashMap<String, *mut ffi::sqlite3>,
 }
+// NOTE: the session deliberately does NOT retain the envelope. Envelope-mutating ops
+// (add_recovery/add_passkey/remove_method) update the SDK's IndexedDB copy but not the worker, so a
+// stored snapshot would go stale — a bundle exported mid-session could then omit a just-added method,
+// or `rotate_dek` could rotate the wrong generation. Both `session_export` and `rotate_dek` instead
+// take the CURRENT envelope as an argument (the SDK passes its rollback-guarded IndexedDB copy).
 
 thread_local! {
     static SESSION: RefCell<Option<Session>> = const { RefCell::new(None) };
@@ -2537,7 +2539,7 @@ async fn session_begin(
         }
     }
     SESSION.with(|s| {
-        *s.borrow_mut() = Some(Session { util, envelope: envelope.to_vec(), handles: HashMap::new() })
+        *s.borrow_mut() = Some(Session { util, handles: HashMap::new() })
     });
     Ok(())
 }
@@ -2651,7 +2653,7 @@ pub fn session_sql(db: &str, sql: &str, params_json: &str) -> Result<String, JsV
     session_sql_inner(db, sql, params_json).map_err(|e| JsValue::from_str(&e))
 }
 
-fn session_export_inner(cred_id: &[u8]) -> std::result::Result<Vec<u8>, String> {
+fn session_export_inner(cred_id: &[u8], envelope: &[u8]) -> std::result::Result<Vec<u8>, String> {
     SESSION.with(|cell| {
         let guard = cell.borrow();
         let s = guard
@@ -2679,24 +2681,27 @@ fn session_export_inner(cred_id: &[u8]) -> std::result::Result<Vec<u8>, String> 
             .iter()
             .find(|n| n.as_str() == "app.db")
             .unwrap_or(&db_names[0]);
-        // #3c: attest this session's key-envelope generation inside the token so a peer refuses a
-        // rolled-back envelope. The live session holds the envelope, so we can read it here.
-        let env_gen = envelope::envelope_generation(&s.envelope);
+        // #3c: attest the CURRENT key-envelope generation inside the token so a peer refuses a
+        // rolled-back envelope. The caller passes the current envelope (its rollback-guarded
+        // IndexedDB copy), not a session snapshot — so a method added mid-session is reflected here.
+        let env_gen = envelope::envelope_generation(envelope);
         let epoch = s
             .util
             .export_epoch(epoch_db, env_gen)
             .map_err(|e| format!("export_epoch {epoch_db}: {e:?}"))?;
-        Ok(bundle::encode(&s.envelope, cred_id, &files, &epoch))
+        Ok(bundle::encode(envelope, cred_id, &files, &epoch))
     })
 }
 
 /// Export the binary `.freehold` bundle from the LIVE session: envelope + credential id + the
 /// encrypted image of every DB in the pool + a freshly minted sync-epoch token. No key inside.
-/// Pass an empty `cred_id` slice if there is none to embed (e.g. recovery-only flows).
+/// Pass an empty `cred_id` slice if there is none to embed (e.g. recovery-only flows). `envelope`
+/// is the caller's CURRENT (rollback-guarded) envelope — it is embedded verbatim and its generation
+/// is attested in the epoch, so a method added since unlock is reflected in the bundle.
 #[wasm_bindgen]
-pub fn session_export(cred_id: &[u8]) -> Result<Vec<u8>, JsValue> {
+pub fn session_export(cred_id: &[u8], envelope: &[u8]) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
-    session_export_inner(cred_id).map_err(|e| JsValue::from_str(&e))
+    session_export_inner(cred_id, envelope).map_err(|e| JsValue::from_str(&e))
 }
 
 // issue #4 / D-RK1..4 (DEK rotation, increment 2): the whole ceremony, atomic in the worker. Takes the

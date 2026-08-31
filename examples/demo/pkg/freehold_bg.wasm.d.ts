@@ -12,7 +12,7 @@ export const remove_method: (a: number, b: number, c: number, d: number, e: numb
 export const rotate_dek: (a: number, b: number, c: number, d: number) => any;
 export const run_tests: () => any;
 export const session_active: () => number;
-export const session_export: (a: number, b: number) => [number, number, number, number];
+export const session_export: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const session_lock: () => [number, number];
 export const session_open: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
 export const session_open_recovery: (a: number, b: number, c: number, d: number, e: number, f: number) => any;

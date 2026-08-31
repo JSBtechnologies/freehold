@@ -37,13 +37,14 @@ test('generate golden .freehold decrypt fixture', async ({ browser }) => {
 
   await page.evaluate(() => window.FH.open());
   await page.evaluate(() => window.FH.enroll());
-  // Add the recovery method BEFORE unlock so the SESSION opens the envelope that already carries the
-  // recovery slot — session_export() embeds the session's open-time envelope, so a code added
-  // mid-session would not reach the bundle (see the note in docs/bundle-format.md / index.js).
-  await page.evaluate((c) => window.FH.addRecoveryCode(c), CODE);
   await page.evaluate(() => window.FH.unlock());
   await page.evaluate((r) => window.FH.sql('CREATE TABLE t(v TEXT)', []).then(() =>
     window.FH.sql('INSERT INTO t(v) VALUES (?)', [r])), ROW);
+  // Add the recovery method MID-SESSION, AFTER unlock — this is the case that used to omit the slot
+  // from the bundle (session_export embedded the session's open-time envelope). Now exportBundle()
+  // passes the current envelope, so the recovery slot IS in the bundle: the native decrypt test that
+  // opens this fixture with the recovery code is the end-to-end regression proof of that fix.
+  await page.evaluate((c) => window.FH.addRecoveryCode(c), CODE);
   const b64 = await page.evaluate(() => window.FH.exportBundleB64());
 
   const bytes = Buffer.from(b64, 'base64');

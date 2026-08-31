@@ -198,20 +198,25 @@ export function session_active() {
 /**
  * Export the binary `.freehold` bundle from the LIVE session: envelope + credential id + the
  * encrypted image of every DB in the pool + a freshly minted sync-epoch token. No key inside.
- * Pass an empty `cred_id` slice if there is none to embed (e.g. recovery-only flows).
+ * Pass an empty `cred_id` slice if there is none to embed (e.g. recovery-only flows). `envelope`
+ * is the caller's CURRENT (rollback-guarded) envelope — it is embedded verbatim and its generation
+ * is attested in the epoch, so a method added since unlock is reflected in the bundle.
  * @param {Uint8Array} cred_id
+ * @param {Uint8Array} envelope
  * @returns {Uint8Array}
  */
-export function session_export(cred_id) {
+export function session_export(cred_id, envelope) {
     const ptr0 = passArray8ToWasm0(cred_id, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.session_export(ptr0, len0);
+    const ptr1 = passArray8ToWasm0(envelope, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.session_export(ptr0, len0, ptr1, len1);
     if (ret[3]) {
         throw takeFromExternrefTable0(ret[2]);
     }
-    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-    return v2;
+    return v3;
 }
 
 /**
@@ -848,7 +853,7 @@ function __wbg_get_imports() {
             return ret;
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 698, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 697, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__ha22148a4a7c1d5ff);
             return ret;
         },

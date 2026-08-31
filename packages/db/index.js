@@ -478,7 +478,11 @@ export class FreeholdVault {
     }
     this.#touch();
     const credId = (await idbGet('credId')) || new Uint8Array(0);
-    return this.#call('session_export', [credId]);
+    // Pass the CURRENT (rollback-guarded) envelope, not a worker snapshot: add_recovery/add_passkey/
+    // remove_method update IndexedDB but not the open session, so a method added since unlock() would
+    // otherwise be missing from the bundle. The worker embeds this verbatim + attests its generation.
+    const envelope = await this.#envelope();
+    return this.#call('session_export', [credId, envelope]);
   }
 
   /** Import a `.freehold` bundle: writes the ciphertext files into OPFS and persists the bundled

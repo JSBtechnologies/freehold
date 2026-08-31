@@ -67,9 +67,11 @@ export function session_active(): boolean;
 /**
  * Export the binary `.freehold` bundle from the LIVE session: envelope + credential id + the
  * encrypted image of every DB in the pool + a freshly minted sync-epoch token. No key inside.
- * Pass an empty `cred_id` slice if there is none to embed (e.g. recovery-only flows).
+ * Pass an empty `cred_id` slice if there is none to embed (e.g. recovery-only flows). `envelope`
+ * is the caller's CURRENT (rollback-guarded) envelope — it is embedded verbatim and its generation
+ * is attested in the epoch, so a method added since unlock is reflected in the bundle.
  */
-export function session_export(cred_id: Uint8Array): Uint8Array;
+export function session_export(cred_id: Uint8Array, envelope: Uint8Array): Uint8Array;
 
 /**
  * Lock the session: close handles, release the pool (see `session_lock_inner`), drop the session.
@@ -150,7 +152,7 @@ export interface InitOutput {
     readonly rotate_dek: (a: number, b: number, c: number, d: number) => any;
     readonly run_tests: () => any;
     readonly session_active: () => number;
-    readonly session_export: (a: number, b: number) => [number, number, number, number];
+    readonly session_export: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly session_lock: () => [number, number];
     readonly session_open: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
     readonly session_open_recovery: (a: number, b: number, c: number, d: number, e: number, f: number) => any;

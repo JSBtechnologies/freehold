@@ -94,12 +94,14 @@ nothing (all AEAD), but a leaked recovery code opens any copy of the bundle it w
 readable only by whoever held the *old* code — rotation protects future state, it cannot un-leak an
 old exported copy.
 
-## Note — exporting after mid-session method changes
-`session_export` embeds the session's **open-time** envelope. A method added *during* a live session
-(`addRecoveryCode`/`addPasskey`) updates IndexedDB but not the in-worker session snapshot, so a bundle
-exported without re-`unlock()`ing carries the pre-change envelope. Add recovery methods **before**
-unlocking, or re-`unlock()` before `exportBundle()`, so the intended recovery slot is in the bundle.
-(Tracked as a session_export freshness item; the fixture generator adds the code before unlock.)
+## Exporting after mid-session method changes (fixed)
+`exportBundle()` embeds the **current** envelope: it passes the SDK's rollback-guarded IndexedDB copy
+into `session_export`, which uses it for both the embedded envelope and the attested epoch generation.
+So a recovery method or passkey added *during* a live session (`addRecoveryCode`/`addPasskey`) is
+present in a bundle exported later in that same session — no re-`unlock()` needed. (Earlier the session
+retained an open-time envelope snapshot that could go stale; the session no longer stores the envelope
+at all. The golden fixture is generated with the recovery code added mid-session, so the native decrypt
+test is the regression guard.)
 
 ## Cross-links
 [[header-free-encrypted-vfs]] design-spec §11 (envelope) / §14 (cross-device image), envelope v3
