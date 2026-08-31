@@ -1,0 +1,19 @@
+[package]
+name = "freehold-decrypt"
+version = "0.1.0"
+edition = "2021"
+description = "Standalone, runtime-free recovery tool for .freehold bundles: recovery code -> DEK -> plaintext SQLite. Proves self-custody — depends only on audited RustCrypto, NOT on the Freehold VFS/SQLite runtime."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/JSBtechnologies/freehold"
+
+# The whole point: NO dependency on the `freehold` crate, no sqlite, no wasm — only the same audited
+# RustCrypto primitives the main crate uses, at the SAME versions, so `Argon2::default()` and every
+# HKDF/AEAD derivation reproduce the format bit-for-bit. This crate therefore builds and TESTS
+# natively (the main crate cannot: sqlite-wasm-rs's C build rejects MSVC). Run: `cargo test -p freehold-decrypt`.
+[dependencies]
+chacha20poly1305 = "0.10"   # XChaCha20-Poly1305 AEAD (24-byte nonce) — envelope slots + DB blocks
+hkdf = "0.12"               # HKDF-SHA256 — db_key / mac_key / kek derivation
+sha2 = "0.10"               # SHA-256 — HKDF + file_id
+hmac = "0.12"               # HMAC-SHA256 — envelope-wide MAC verification (v3 anti-rollback)
+argon2 = "0.5"              # Argon2id — recovery-code KEK (MUST match the main crate's default params)
+zeroize = "1"               # zeroize DEK / KEK scratch

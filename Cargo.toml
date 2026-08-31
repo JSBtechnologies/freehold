@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/freehold"]
+# `freehold` builds only for wasm (sqlite-wasm-rs + getrandom/js). `freehold-decrypt` is a standalone
+# NATIVE tool with no dependency on it — a workspace member so `cargo {build,test} -p freehold-decrypt`
+# works from here, while `freehold` continues to be built via wasm-pack, never `cargo build` at root.
+members = ["crates/freehold", "crates/freehold-decrypt"]
 
 # rustc -O matters for cipher throughput; wasm-opt is skipped per-crate (crashes on Windows).
 [profile.release]
