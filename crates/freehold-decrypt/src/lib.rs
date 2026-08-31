@@ -174,10 +174,14 @@ fn open_envelope(envelope: &[u8], recovery_code: &str) -> Result<Zeroizing<[u8; 
     let salt = &envelope[ENV_SALT_OFF..ENV_SALT_OFF + ENV_SALT_LEN];
 
     // KEK = Argon2id(normalized code, env_salt). Normalization matches envelope.rs: drop all
-    // whitespace, upper-case (so transcription differences don't change the key).
+    // whitespace, upper-case (so transcription differences don't change the key). The Argon2id params
+    // are PINNED to the exact same explicit values envelope.rs uses (m=19456 KiB, t=2, p=1, out=32) —
+    // never `Argon2::default()`, whose values could drift across crate versions — so this tool
+    // reproduces the runtime's KEK bit-for-bit regardless of the installed argon2 version.
     let norm = recovery_code.split_whitespace().collect::<String>().to_uppercase();
     let mut kek = Zeroizing::new([0u8; 32]);
-    Argon2::default()
+    let params = argon2::Params::new(19_456, 2, 1, Some(32)).map_err(|_| Error::Kdf)?;
+    Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
         .hash_password_into(norm.as_bytes(), salt, kek.as_mut_slice())
         .map_err(|_| Error::Kdf)?;
     let cipher = XChaCha20Poly1305::new(Key::from_slice(kek.as_slice()));

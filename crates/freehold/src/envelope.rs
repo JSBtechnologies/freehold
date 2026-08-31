@@ -104,13 +104,29 @@ fn kek_from_prf(prf_output: &[u8]) -> Zeroizing<[u8; 32]> {
     kek
 }
 
+/// Argon2id parameters for the recovery-code KEK, PINNED explicitly — never `Argon2::default()`,
+/// whose values could shift across `argon2` crate versions and silently change every recovery KEK
+/// (breaking existing vaults or weakening the KDF unnoticed). These are the current audited defaults,
+/// which meet the OWASP Argon2id minimum (m = 19 MiB, t = 2, p = 1) and balance browser/wasm unlock
+/// latency. The standalone decryptor pins the SAME values, so the two derivations stay bit-identical.
+/// Changing these is a deliberate, breaking KDF change (re-enroll), not a dependency-update side effect.
+const ARGON2_M_COST: u32 = 19_456; // KiB (19 MiB)
+const ARGON2_T_COST: u32 = 2;
+const ARGON2_P_COST: u32 = 1;
+fn recovery_argon2() -> Result<Argon2<'static>, EnvelopeError> {
+    let params = argon2::Params::new(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST, Some(32))
+        .map_err(|_| EnvelopeError::Kdf)?;
+    Ok(Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params))
+}
+
 /// Normalize a recovery code so trivial transcription differences (case, spacing) don't change the
-/// KEK, then stretch it with Argon2id. The `env_salt` (per-envelope random, stored plaintext in the
-/// header) makes the KDF output unique per database — salts need uniqueness, not secrecy.
+/// KEK, then stretch it with Argon2id (pinned params, see `recovery_argon2`). The `env_salt`
+/// (per-envelope random, stored plaintext in the header) makes the KDF output unique per database —
+/// salts need uniqueness, not secrecy.
 fn kek_from_recovery(code: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>, EnvelopeError> {
     let norm = code.split_whitespace().collect::<Vec<_>>().join("").to_uppercase();
     let mut kek = Zeroizing::new([0u8; 32]);
-    Argon2::default()
+    recovery_argon2()?
         .hash_password_into(norm.as_bytes(), salt, kek.as_mut_slice())
         .map_err(|_| EnvelopeError::Kdf)?;
     Ok(kek)
