@@ -326,6 +326,41 @@ pub fn remove_slot(blob: &[u8], dek: &[u8; DEK_LEN], kek_id: u8) -> Result<Vec<u
     Ok(rebuild(blob, dek, &keep, kept))
 }
 
+/// Overwrite the generation field of an already-built envelope and re-MAC under `dek`. Private —
+/// only `rotate_envelope` needs it, to carry the pre-rotation generation forward past a freshly
+/// created (gen-small) envelope so the SDK floor keeps refusing the old one.
+fn set_generation(blob: &mut [u8], gen: u64, dek: &[u8; DEK_LEN]) -> Result<(), EnvelopeError> {
+    let n = parse(blob)?;
+    blob[GEN_OFF..GEN_OFF + GEN_LEN].copy_from_slice(&gen.to_le_bytes());
+    let mac = compute_mac(&blob[..body_len(n)], dek);
+    blob[body_len(n)..body_len(n) + MAC_LEN].copy_from_slice(&mac);
+    Ok(())
+}
+
+/// Rotate to a **fresh** envelope under `new_dek` (issue #4 / D-RK1). The result wraps `new_dek` under
+/// ONLY the presenting passkey (`surviving_prf`) plus a freshly minted recovery code — every other
+/// method the old envelope held is deliberately orphaned, because a rotation ceremony holds no absent
+/// authenticator's PRF material and re-wrapping foreign slots would re-admit the very device being
+/// evicted (see docs/dek-rotation-design.md §3). The new envelope gets a new `env_salt` (from
+/// `create_envelope`) and its generation is carried forward to `old_gen + 1`, so the SDK's freshness
+/// floor still refuses any pre-rotation envelope. Returns the new blob and the one-time recovery code
+/// to display. Caller supplies `new_dek` (a fresh `random_dek()`); this function never sees the old DEK.
+pub fn rotate_envelope(
+    old_blob: &[u8],
+    new_dek: &[u8; DEK_LEN],
+    surviving_prf: &[u8],
+) -> Result<(Vec<u8>, String), EnvelopeError> {
+    let old_gen = read_generation(old_blob);
+    parse(old_blob)?; // validate framing (also guarantees old_gen was read from a real header)
+    // Fresh envelope under DEK′: presenting passkey (kek_id 0) + a new recovery code (kek_id 1).
+    let mut env = create_envelope(new_dek, surviving_prf)?;
+    let code = generate_recovery_code()?;
+    env = add_recovery_slot(&env, new_dek, &code)?;
+    // Carry the generation strictly past the old envelope (old_gen ≥ 1 for any real blob).
+    set_generation(&mut env, old_gen.wrapping_add(1), new_dek)?;
+    Ok((env, code))
+}
+
 /// List the slots (kek_id + kind) for a UI. Empty on a malformed blob.
 pub fn slot_infos(blob: &[u8]) -> Vec<SlotInfo> {
     let Ok(n) = parse(blob) else { return Vec::new() };

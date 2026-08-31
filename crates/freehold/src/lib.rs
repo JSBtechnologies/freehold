@@ -719,6 +719,58 @@ async fn run() -> std::result::Result<String, String> {
         r.push_str(&format!(
             "M3b. envelope v3 anti-rollback: gen {gen_before}→{gen_after} monotonic | stale copy REFUSED by floor | forged-gen copy fails MAC (Tamper), no leak\n"
         ));
+
+        // ---- M3c (DEK rotation — envelope half, issue #4 / D-RK1) ------------------------------------
+        // Rotate the CURRENT envelope (opens under passkey-B / recovery `code`, DEK = DEK_OK) to a
+        // FRESH dek', keeping ONLY the presenting passkey (prf_b) + a newly minted recovery code. This
+        // is the cryptographic heart of eviction: after rotation the old DEK is disjoint from the new
+        // envelope, and every method NOT present at the ceremony (old recovery `code`, revoked prf_ok)
+        // is orphaned. The physical DB re-encryption under dek' (pool→pool re-seal, D-RK2) is the
+        // separate increment-1b piece; here we prove the envelope contract in isolation.
+        let new_dek = envelope::random_dek().map_err(|e| format!("M3c: rng dek': {e:?}"))?;
+        if new_dek.as_slice() == DEK_OK.as_slice() {
+            return Err("M3c: random dek' collided with DEK_OK (astronomically unlikely — rng broken)".into());
+        }
+        let (rot_env, rot_code) = envelope::rotate_envelope(&env, &new_dek, &prf_b)
+            .map_err(|e| format!("M3c: rotate_envelope: {e:?}"))?;
+        // (1) Generation carried strictly forward, so the pre-rotation envelope is refused by the floor.
+        let rot_gen = envelope::envelope_generation(&rot_env);
+        if rot_gen != gen_after + 1 {
+            return Err(format!("M3c: rotated gen {rot_gen} != old {gen_after} + 1"));
+        }
+        match envelope::check_fresh(&env, rot_gen) {
+            Err(envelope::EnvelopeError::Rollback) => {}
+            other => return Err(format!("M3c: pre-rotation envelope NOT refused by new floor: {other:?}")),
+        }
+        // (2) Surviving passkey + new recovery code both open the new envelope and recover dek' — NOT DEK_OK.
+        let via_pk = envelope::open_with_prf(&rot_env, &prf_b).map_err(|e| format!("M3c: surviving passkey lost: {e:?}"))?;
+        if via_pk.as_slice() != new_dek.as_slice() {
+            return Err("M3c: surviving passkey recovered the WRONG dek after rotation".into());
+        }
+        let via_newr = envelope::open_with_recovery(&rot_env, &rot_code).map_err(|e| format!("M3c: new recovery lost: {e:?}"))?;
+        if via_newr.as_slice() != new_dek.as_slice() {
+            return Err("M3c: new recovery code recovered the WRONG dek".into());
+        }
+        if via_pk.as_slice() == DEK_OK.as_slice() {
+            return Err("M3c: rotation did NOT change the DEK — old and new identical!".into());
+        }
+        // (3) Every orphaned method is dead against the new envelope: the OLD recovery code (fresh salt
+        // ⇒ different KEK) and the already-revoked passkey-A both fail to open. This is the eviction.
+        if envelope::open_with_recovery(&rot_env, &code).is_ok() {
+            return Err("M3c: ORPHANED old recovery code still opens the rotated envelope!".into());
+        }
+        if envelope::open_with_prf(&rot_env, &prf_ok).is_ok() {
+            return Err("M3c: revoked passkey-A opens the rotated envelope!".into());
+        }
+        // (4) And the OLD envelope still yields the OLD DEK under the surviving passkey — proving the two
+        // envelopes are cryptographically disjoint (old DEK never opens new, new never rewrites old).
+        let old_still = envelope::open_with_prf(&env, &prf_b).map_err(|e| format!("M3c: old env broke: {e:?}"))?;
+        if old_still.as_slice() != DEK_OK.as_slice() {
+            return Err("M3c: old envelope stopped yielding the old DEK".into());
+        }
+        r.push_str(&format!(
+            "M3c. DEK rotation (envelope half): gen {gen_after}→{rot_gen} | dek'≠DEK_OK, disjoint envelopes | surviving passkey + new recovery open dek' | orphaned old-recovery & revoked passkey REFUSED\n"
+        ));
     }
 
     // ---- B. binary TLV bundle (bundle.rs — export/import container, future Sync wire format) --

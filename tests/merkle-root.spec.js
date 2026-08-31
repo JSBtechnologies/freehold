@@ -29,6 +29,10 @@ test('run_tests(): full suite green incl. MK (full-state Merkle root) section', 
   expect(out).toContain('open REFUSED by root check');
   expect(out).toContain('MK(c) legacy zero-root DB');
 
+  // Envelope anti-rollback + DEK-rotation (issue #3/#4) sections must be present and green.
+  expect(out).toContain('M3b. envelope v3 anti-rollback');
+  expect(out).toContain('M3c. DEK rotation (envelope half)');
+
   // Existing security-critical sections must stay green (spot-check the load-bearing ones).
   expect(out).toContain('crash sweep'); // §14.8
   expect(out).toContain('whole-file rollback: open rejected'); // anti-rollback
