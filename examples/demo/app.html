@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Freehold — device / browser test app</title>
+  <style>
+    :root { color-scheme: light dark; --line: #8884; --ok: #1a7f37; --bad: #c0392b; --warn: #b7791f; }
+    * { box-sizing: border-box; }
+    body { font: 15px/1.5 system-ui, sans-serif; max-width: 760px; margin: 0 auto; padding: 16px; }
+    h1 { font-size: 20px; margin: 0 0 2px; }
+    .sub { color: #888; margin: 0 0 16px; font-size: 13px; }
+    section { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin: 12px 0; }
+    h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .04em; color: #888; margin: 0 0 10px; }
+    button { font: inherit; padding: 7px 12px; margin: 3px 4px 3px 0; border-radius: 8px;
+             border: 1px solid var(--line); background: #7771; cursor: pointer; }
+    button:hover:not(:disabled) { background: #7773; }
+    button:disabled { opacity: .4; cursor: not-allowed; }
+    button.primary { border-color: #3b82f6; background: #3b82f622; }
+    button.danger { border-color: var(--bad); color: var(--bad); }
+    input { font: inherit; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--line); background: transparent; width: 100%; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .row > input { flex: 1; min-width: 160px; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    td, th { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+    code, pre { font-family: ui-monospace, monospace; }
+    pre { background: #7771; padding: 10px; border-radius: 8px; overflow-x: auto; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+    .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); }
+    .pill.ok { color: var(--ok); border-color: var(--ok); }
+    .pill.bad { color: var(--bad); border-color: var(--bad); }
+    .pill.warn { color: var(--warn); border-color: var(--warn); }
+    #log { max-height: 220px; overflow-y: auto; }
+    dialog { border: 1px solid var(--line); border-radius: 12px; padding: 20px; max-width: 460px; }
+    dialog::backdrop { background: #0008; }
+    .mono-big { font-size: 18px; letter-spacing: .05em; user-select: all; }
+    .muted { color: #888; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>Freehold — device / browser test app</h1>
+  <p class="sub">Real WebAuthn + OPFS on this actual browser/device — no virtual authenticator. Use it
+     to walk the full lifecycle (enroll → back up → unlock → data → rotate → export/import) and see
+     what this platform actually supports. Nothing leaves this device.</p>
+
+  <section id="caps-sec">
+    <h2>1 · Capability preflight</h2>
+    <div id="caps">probing…</div>
+  </section>
+
+  <section>
+    <h2>2 · Vault</h2>
+    <div class="row" id="vault-actions">
+      <button id="enroll" class="primary">Enroll (create passkey)</button>
+      <button id="unlock" class="primary">Unlock (passkey)</button>
+      <button id="unlock-rec">Unlock with recovery code…</button>
+      <button id="lock">Lock</button>
+    </div>
+    <p class="muted" id="vault-state">status: <span id="state-pill" class="pill">unknown</span>
+       <span id="backup-pill"></span></p>
+  </section>
+
+  <section id="notes-sec">
+    <h2>3 · Your data (encrypted SQLite via sql())</h2>
+    <div class="row">
+      <input id="note-input" placeholder="write a note, then Add…" />
+      <button id="note-add">Add</button>
+      <button id="note-refresh">Refresh</button>
+    </div>
+    <table><tbody id="notes"></tbody></table>
+  </section>
+
+  <section id="methods-sec">
+    <h2>4 · Unlock methods</h2>
+    <div class="row">
+      <button id="add-recovery">Add recovery code</button>
+      <button id="add-passkey">Add another passkey</button>
+      <button id="refresh-methods">Refresh</button>
+    </div>
+    <table><tbody id="methods"></tbody></table>
+  </section>
+
+  <section id="rotate-sec">
+    <h2>5 · Rotate DEK (revoke &amp; re-encrypt)</h2>
+    <p class="muted">Re-encrypts every database under a fresh key and issues a NEW envelope + recovery
+       code, orphaning every other method. This is how you evict a lost/compromised device.
+       <b>Limit:</b> it protects future state and forces an attacker off the live DB — it cannot
+       un-leak data already exfiltrated, nor re-encrypt old exported copies they kept.</p>
+    <button id="rotate" class="danger">Rotate DEK now…</button>
+  </section>
+
+  <section id="portability-sec">
+    <h2>6 · Portability &amp; self-custody</h2>
+    <div class="row">
+      <button id="export">Export .freehold bundle (download)</button>
+      <input id="import-file" type="file" accept=".freehold,application/octet-stream" style="display:none" />
+      <button id="import">Import a .freehold bundle…</button>
+    </div>
+    <p class="muted">Recover a downloaded bundle with the standalone tool (no Freehold runtime):</p>
+    <pre id="decrypt-hint">cargo run -p freehold-decrypt --release -- vault.freehold "YOUR-RECOVERY-CODE" ./out
+# → ./out/app.sqlite  (open with any sqlite3)</pre>
+  </section>
+
+  <section>
+    <h2>Log</h2>
+    <pre id="log"></pre>
+  </section>
+
+  <dialog id="code-dialog">
+    <h3 id="code-title">Save your recovery code</h3>
+    <p class="muted">This is shown ONCE. It is the only way in if you lose every device. Write it down
+       or store it in a password manager, then confirm.</p>
+    <p class="mono-big" id="code-value"></p>
+    <div class="row">
+      <button id="code-copy">Copy</button>
+      <button id="code-done" class="primary">I saved it</button>
+    </div>
+  </dialog>
+
+  <dialog id="rec-dialog">
+    <h3>Unlock with recovery code</h3>
+    <input id="rec-input" placeholder="paste your recovery code" />
+    <div class="row" style="margin-top:10px">
+      <button id="rec-cancel">Cancel</button>
+      <button id="rec-go" class="primary">Unlock</button>
+    </div>
+  </dialog>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
