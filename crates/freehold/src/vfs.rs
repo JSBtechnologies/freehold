@@ -2034,6 +2034,81 @@ impl OpfsSAHPool {
         })?
     }
 
+    // issue #4 / D-RK2 (DEK rotation, physical re-encryption): re-key a CLOSED DB's ciphertext from
+    // this pool's DEK to `new_dek`, returning the re-sealed files (main + manifest) ready to import
+    // into a pool built with `new_dek`. This is a PURE per-block re-key: `db_uuid`, `file_id`,
+    // `key_domain` and every plaintext byte are unchanged, so each block is decrypted under
+    // `db_key(DEK,uuid)` and re-sealed under `db_key(new_dek,uuid)` with the IDENTICAL AAD — no
+    // content re-encryption, no layout change, and the plaintext-derived Merkle root/generation carry
+    // over untouched (no recompute). The pool-global anchor (sealed under `anchor_key`, shared by every
+    // DB in the pool) is deliberately NOT carried here — the destination pool establishes a fresh
+    // anchor on first commit; carrying the generation floor across rotation is increment-2 (commit
+    // barrier) work. Reads via `export_raw`/writes are imported via `import_files`, so this adds no new
+    // storage path. Requires the DB to be CLOSED (operates on ciphertext at rest).
+    #[cfg(feature = "testing-api")]
+    fn reseal_db_ciphertext(&self, db_name: &str, new_dek: &[u8; 32]) -> Result<Vec<(String, Vec<u8>)>> {
+        let mname = manifest_name(db_name);
+        // `db_uuid` lives in the manifest's PLAINTEXT header (magic(8) ‖ uuid(16)) — readable with no key.
+        let m_raw = self.export_raw(&mname)?;
+        if m_raw.len() < 24 || &m_raw[0..8] != MANIFEST_MAGIC.as_slice() {
+            return Err(OpfsSAHError::Generic("reseal: manifest header missing/invalid".into()));
+        }
+        let mut uuid = [0u8; 16];
+        uuid.copy_from_slice(&m_raw[8..24]);
+        let old_k = Crypto::db_key(&self.dek, &uuid);
+        let new_k = Crypto::db_key(new_dek, &uuid);
+        let p = crypto::PHYS_BLOCK;
+        let b = crypto::BLOCK_SIZE;
+        let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+
+        // (1) Main DB file: a uniform block grid from offset 0; block_index = physical block k.
+        if self.has_filename(db_name) {
+            let raw = self.export_raw(db_name)?;
+            let fid = crypto::file_id_for(db_name);
+            let nblocks = raw.len() / p;
+            let mut resealed = vec![0u8; nblocks * p];
+            let mut plain = Zeroizing::new(vec![0u8; b]);
+            for k in 0..nblocks {
+                old_k
+                    .open_into(&fid, &uuid, k as u64, &raw[k * p..k * p + p], &mut plain)
+                    .map_err(|_| OpfsSAHError::Generic(format!("reseal main blk {k}: old-DEK auth failed")))?;
+                new_k
+                    .seal_into(&fid, &uuid, k as u64, &plain, &mut resealed[k * p..k * p + p])
+                    .map_err(|e| OpfsSAHError::Generic(format!("reseal main blk {k} seal: {e:?}")))?;
+            }
+            out.push((db_name.to_string(), resealed));
+        }
+
+        // (2) Manifest: a plaintext header (MANIFEST_HDR_LEN, copied verbatim) then up to two sealed
+        // slots, each with block_index = slot (matching read_manifest's `at = HDR + slot*P`). A slot
+        // that fails to authenticate under the old key is an unwritten/torn slot — copied verbatim (it
+        // authenticates under neither key and read_manifest already skips it).
+        let fid_m = crypto::file_id_for(&mname);
+        let mut m_out = m_raw[..MANIFEST_HDR_LEN].to_vec();
+        let mut plain = Zeroizing::new(vec![0u8; b]);
+        let mut slot = 0usize;
+        loop {
+            let at = MANIFEST_HDR_LEN + slot * p;
+            if at + p > m_raw.len() {
+                break;
+            }
+            let sealed = &m_raw[at..at + p];
+            match old_k.open_into(&fid_m, &uuid, slot as u64, sealed, &mut plain) {
+                Ok(()) => {
+                    let mut block = vec![0u8; p];
+                    new_k
+                        .seal_into(&fid_m, &uuid, slot as u64, &plain, &mut block)
+                        .map_err(|e| OpfsSAHError::Generic(format!("reseal manifest slot {slot} seal: {e:?}")))?;
+                    m_out.extend_from_slice(&block);
+                }
+                Err(_) => m_out.extend_from_slice(sealed),
+            }
+            slot += 1;
+        }
+        out.push((mname, m_out));
+        Ok(out)
+    }
+
     // ENC (M3, §14.9): model-based property test of the block device's size/offset arithmetic.
     // Drives a scratch pool file through random SQLite-shaped operations (append/overwrite writes
     // with no sparse holes; shrink-only truncates — SQLite never grows via xTruncate or writes
@@ -2597,6 +2672,15 @@ impl OpfsSAHPoolUtil {
     #[cfg(feature = "testing-api")]
     pub fn import_anchor_raw(&self, bytes: &[u8]) -> Result<()> {
         self.pool.import_anchor_raw(bytes)
+    }
+
+    /// issue #4 / D-RK2: re-key a CLOSED DB's ciphertext from this pool's DEK to `new_dek`, returning
+    /// the re-sealed (main + manifest) files to import into a pool built with `new_dek`. Same
+    /// `db_uuid`, same plaintext — a pure per-block re-seal (see `reseal_db_ciphertext`). Proof-only
+    /// for now (increment 1b); the wired rotation ceremony + two-store commit barrier is increment 2.
+    #[cfg(feature = "testing-api")]
+    pub fn reseal_db(&self, db_name: &str, new_dek: &[u8; 32]) -> Result<Vec<(String, Vec<u8>)>> {
+        self.pool.reseal_db_ciphertext(db_name, new_dek)
     }
 
     /// ENC (M3 cross-device): export a DB's encrypted image (main + manifest) as a `name|hex` bundle.

@@ -546,6 +546,76 @@ async fn sync_test() -> std::result::Result<String, String> {
     )
 }
 
+/// Section RK — DEK rotation, PHYSICAL re-encryption (issue #4 / D-RK2, increment 1b). Proves the
+/// block-device half of rotation the same way the sync mechanism was proven before wiring: with
+/// pool-dirs-as-devices. A DB is written under `DEK_OK`, re-keyed to a fresh `dek2` via the pure
+/// per-block `reseal_db` (same db_uuid, same plaintext), and re-imported into a pool built with
+/// `dek2` — where it opens and reads back intact. The security-critical assertion: the SAME re-sealed
+/// image under the OLD DEK does NOT yield the data — the old key is now useless against the rotated
+/// database, which is the whole point of eviction. (The envelope half is proven by M3c; the two halves
+/// are stitched into one atomic ceremony + commit barrier in increment 2.)
+async fn rekey_test() -> std::result::Result<String, String> {
+    const RKDB: &str = "rk.db";
+    // A fresh DEK guaranteed distinct from DEK_OK.
+    let mut dek2 = DEK_OK;
+    dek2[0] ^= 0xff;
+
+    // Source device: create + populate under DEK_OK, then close (re-key operates on ciphertext at rest).
+    let src = install_dir("rk-src", "rk-src", true, &DEK_OK).await?;
+    unsafe {
+        let db = open_default(RKDB)?;
+        set_pragmas(db)?;
+        exec(db, "CREATE TABLE t(v TEXT)")?;
+        exec(db, "INSERT INTO t(v) VALUES ('rotate-me')")?;
+        ffi::sqlite3_close(db);
+    }
+    // Re-key the closed DB's ciphertext DEK_OK → dek2 (main + manifest, same db_uuid, same plaintext).
+    let files = src.reseal_db(RKDB, &dek2).map_err(|e| format!("RK reseal: {e:?}"))?;
+    if files.is_empty() {
+        return Err("RK: reseal produced no files".into());
+    }
+    src.pause_vfs().map_err(|e| format!("RK pause src: {e:?}"))?;
+
+    // Destination device: a pool built with dek2 imports the re-sealed image → opens + reads intact.
+    let dst = install_dir("rk-dst", "rk-dst", true, &dek2).await?;
+    dst.import_files(&files).map_err(|e| format!("RK import dst: {e:?}"))?;
+    let got = unsafe {
+        let db = open_default(RKDB)?;
+        let v = scalar_text(db, "SELECT v FROM t LIMIT 1")?;
+        ffi::sqlite3_close(db);
+        v
+    };
+    if got != "rotate-me" {
+        return Err(format!("RK: dek2 read back '{got}', expected 'rotate-me' (re-key corrupted the DB)"));
+    }
+    dst.pause_vfs().map_err(|e| format!("RK pause dst: {e:?}"))?;
+
+    // SECURITY: the SAME re-sealed image under the OLD DEK must NOT recover the data. A pool built with
+    // DEK_OK imports the dek2-sealed files; opening must fail to authenticate (or recreate empty) —
+    // anything that yields 'rotate-me' means the old key still opens the rotated DB (rotation broken).
+    let wrong = install_dir("rk-wrong", "rk-wrong", true, &DEK_OK).await?;
+    wrong.import_files(&files).map_err(|e| format!("RK import wrong: {e:?}"))?;
+    let leaked = unsafe {
+        match open_default(RKDB) {
+            Ok(db) => {
+                let v = scalar_text(db, "SELECT v FROM t LIMIT 1").ok();
+                ffi::sqlite3_close(db);
+                v
+            }
+            Err(_) => None,
+        }
+    };
+    if leaked.as_deref() == Some("rotate-me") {
+        return Err("RK: re-sealed image decrypted under the OLD DEK — rotation did NOT change the key!".into());
+    }
+    wrong.pause_vfs().map_err(|e| format!("RK pause wrong: {e:?}"))?;
+
+    Ok(
+        "RK. DEK rotation (physical re-encryption): DB re-keyed DEK\u{2192}dek' via pure per-block reseal (same uuid/plaintext) opens + reads intact under dek'; the SAME image under the OLD DEK recovers nothing \u{2705}"
+            .to_string(),
+    )
+}
+
 /// Section S — the session model, driven exactly as the SDK drives it but with a MOCK PRF (no
 /// gesture): open → typed parameterized SQL on named DBs → isolation → strict-name and
 /// multi-statement-with-params rejection → lock kills ops → reopen sees the data. Runs on its own
@@ -1859,6 +1929,10 @@ async fn run() -> std::result::Result<String, String> {
 
     // ---- Section SY: Freehold Sync ordering + fork semantics (blind-relay mock) -----------------
     r.push_str(&sync_test().await?);
+    r.push('\n');
+
+    // ---- Section RK: DEK rotation, physical re-encryption (issue #4 / D-RK2, increment 1b) --------
+    r.push_str(&rekey_test().await?);
     r.push('\n');
 
     // ---- Section SJ: the SDK-facing session sync ops (wasm boundary the @freehold/db worker uses) -

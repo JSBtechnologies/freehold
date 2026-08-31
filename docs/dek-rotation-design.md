@@ -177,10 +177,18 @@ second passkey re-enrolls).
   carries the generation strictly forward (pre-rotation envelope refused by the new floor), and leaves
   the old envelope still yielding the old DEK (the two are cryptographically disjoint). No VFS/SDK
   wiring yet — this is the envelope contract in isolation. All 3 E2E specs stay green.
-- **Increment 1b NEXT:** physical DB re-encryption (§4) as a pool→pool re-seal (same `db_uuid`;
-  per-block `open(db_key(DEK,uuid))→seal(db_key(DEK′,uuid))`, plus the anchor under
-  `anchor_key(DEK′)`), with a round-trip + fault-injection proof in `run_tests`.
-- **Increment 2:** commit barrier (§6) + SDK `rotateKey()` + demo + E2E (§8 order).
+- **Increment 1b DONE:** physical DB re-encryption (§4) as a pool→pool re-seal —
+  `OpfsSAHPoolUtil::reseal_db(db_name, new_dek)` (vfs.rs, `reseal_db_ciphertext`): re-keys a CLOSED
+  DB's main file (uniform block grid) + manifest (plaintext header + 2 sealed slots) by pure per-block
+  `open(db_key(DEK,uuid))→seal(db_key(DEK′,uuid))` — same `db_uuid`, same plaintext, no recompute.
+  Proven by `run_tests` **RK** (pinned in `merkle-root.spec.js`): a DB written under DEK, re-keyed to
+  dek′, imported into a pool built with dek′, opens and reads back intact; the SAME re-sealed image
+  under the OLD DEK recovers nothing (the eviction property). The pool-global anchor is NOT carried
+  (destination establishes a fresh one; carrying the generation floor is increment-2 work). This is a
+  proof-only primitive (`#[cfg(feature = "testing-api")]`) — it graduates to a wired ceremony next.
+- **Increment 2 NEXT:** stitch the two halves (M3c envelope + RK image) into ONE atomic ceremony
+  behind the commit barrier (§6) — a `rotate_dek` worker op, SDK `rotateKey()`, anchor/floor carry-
+  forward, demo, and an E2E (§8 order). Cleanest after #3c.
 
 ## Cross-links
 [[header-free-encrypted-vfs]] design-spec §11 (the named-but-unbuilt rotation this fulfils),
