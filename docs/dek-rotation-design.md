@@ -202,10 +202,20 @@ second passkey re-enrolls).
   image; a crash BEFORE commit rolls BACK (old DEK reads old data, staging GC'd); a crash AFTER rolls
   FORWARD (new DEK reads the data) and is idempotent; the rolled-forward DB no longer opens under the
   OLD DEK (eviction, end to end). `rotate_dek` added to the vault-worker OPS allowlist. All 3 E2E green.
-  NOTE (deferred, safe): the pool-global anchor is NOT carried across rotation — the new-DEK pool reads
-  the old-DEK anchor as "fresh" and re-seeds the rollback floor from the (plaintext-preserved) manifest
-  generation on first open. Safe because the DEK′ line begins at rotation, so no older DEK′ image can
-  exist to roll back to; an explicit anchor re-seal can be added if a stricter local floor is wanted.
+- **Increment 3 DONE — anchor carry-forward.** Closes the freshness-floor gap the 2a note flagged. The
+  freshness anchor (`{committed, in_flight, epoch_floor}` per db_uuid) is sealed under `anchor_key =
+  HKDF(DEK)`, so DEK′ cannot read the pre-rotation anchor; previously the first post-rotation open found
+  no entry and the STRICT peer-attested `epoch_floor` silently reset to 0 (the `committed` high-water
+  re-seeded harmlessly from the plaintext-preserved manifest generation, but the no-slack epoch floor was
+  lost — a 1-generation rollback window a peer epoch had closed). Now `stage_rotation` snapshots the
+  anchor under the OLD DEK into the (DEK′-sealed) rotation-intent record — bumped to a versioned v2 layout
+  (`encode_rotation_intent`/`parse_rotation_intent`) — and `recover_rotation`'s roll-FORWARD re-establishes
+  each entry under DEK′ via `anchor_record_full` (max-merge, so idempotent across a mid-roll crash) BEFORE
+  it drops the intent, so the floor is never lost in the swap→delete window. The re-seal preserves each
+  db_uuid and manifest generation, so `committed == manifest gen` and `epoch_floor ≤ it` — no carried
+  value can trip a false rollback on the next open. Proven by `run_tests` **RK3** (pinned in
+  `merkle-root.spec.js`): a strict epoch floor raised under DEK survives rotation, reappears under DEK′
+  with its committed high-water intact, and the DB still opens + reads. All 5 E2E green.
 - **Increment 2b DONE:** SDK `rotateKey()` (packages/db/index.js). Guards on the rollback-checked
   current envelope, asserts this device's passkey, calls the worker `rotate_dek(prf, current)` (passing
   the CURRENT envelope, not the session's open-time snapshot, so the new generation climbs past any

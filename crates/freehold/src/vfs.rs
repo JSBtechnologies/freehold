@@ -1926,6 +1926,13 @@ impl OpfsSAHPool {
         (seq % 2) as usize
     }
 
+    // issue #4 test-rig (anchor carry-forward): the decoded freshness anchor entries as read under THIS
+    // pool's DEK. Used by RK3 to prove a strict epoch floor set under DEK survives rotation under DEK′.
+    #[cfg(feature = "testing-api")]
+    fn anchor_entries(&self) -> Vec<AnchorEntry> {
+        self.anchor_load().1
+    }
+
     // ENC (H1 test-rig): snapshot the raw on-disk anchor bytes (both slots) — an attacker with OPFS
     // write access captures these to replay later. Returns the whole anchor file.
     #[cfg(feature = "testing-api")]
@@ -2182,17 +2189,14 @@ impl OpfsSAHPool {
                 self.import_ciphertext_file(&shadow_name(&name), &bytes)?;
             }
         }
-        // 2. Intent record: {old_gen(8) | new_gen(8) | [len(1) | name]...} sealed under DEK′.
-        let mut plain = Vec::new();
-        plain.extend_from_slice(&old_gen.to_le_bytes());
-        plain.extend_from_slice(&new_gen.to_le_bytes());
-        for db in db_names {
-            if db.len() > 255 {
-                return Err(OpfsSAHError::Generic(format!("rotate: db name too long: {db:?}")));
-            }
-            plain.push(db.len() as u8);
-            plain.extend_from_slice(db.as_bytes());
-        }
+        // 2. Intent record (sealed under DEK′): {old_gen, new_gen}, the DB name list, AND a snapshot of
+        // this pool's freshness anchor (per-uuid committed / in_flight / STRICT epoch_floor), captured
+        // HERE under the OLD DEK. The old anchor is sealed under `anchor_key`, which DEK′ cannot read, so
+        // without this carry the first post-rotation open would find no entry and the peer-attested
+        // rollback floor would silently reset to 0. `recover_rotation`'s roll-FORWARD re-establishes it
+        // under DEK′ (see there). The snapshot is non-secret lineage metadata (generations + uuids).
+        let anchors = self.anchor_load().1;
+        let plain = encode_rotation_intent(old_gen, new_gen, db_names, &anchors)?;
         let sealed = Crypto::rotate_intent_key(new_dek)
             .seal_bytes(ROT_INTENT_AAD, &plain)
             .map_err(|e| OpfsSAHError::Generic(format!("rotate intent seal: {e:?}")))?;
@@ -2217,7 +2221,7 @@ impl OpfsSAHPool {
         match Crypto::rotate_intent_key(&self.dek).open_bytes(ROT_INTENT_AAD, &sealed) {
             Ok(plain) => {
                 // Post-commit line: roll FORWARD.
-                let db_names = parse_rotation_intent(&plain)?;
+                let (db_names, anchors) = parse_rotation_intent(&plain)?;
                 for db in &db_names {
                     for name in [db.clone(), manifest_name(db)] {
                         let sname = shadow_name(&name);
@@ -2228,8 +2232,27 @@ impl OpfsSAHPool {
                         }
                     }
                 }
+                // Re-establish the carried freshness anchor under DEK′ — the crux of the carry-forward.
+                // `anchor_record_full` moves committed / in_flight / STRICT epoch_floor forward only
+                // (max-merge), so replaying it is idempotent: a crash mid-roll re-runs cleanly. Done
+                // BEFORE the intent is dropped, so the floor is never lost in the window between the
+                // image swap and the intent delete. (The DBs are re-keyed to the SAME db_uuid and the
+                // re-seal preserves each manifest generation, so committed == the shadow's manifest gen
+                // and epoch_floor <= it — no carried value can trip a false rollback on the next open.)
+                for e in &anchors {
+                    self.anchor_record_full(
+                        &e.uuid,
+                        Some(e.committed),
+                        Some(e.in_flight),
+                        (e.epoch_floor > 0).then_some(e.epoch_floor),
+                    )?;
+                }
                 let _ = self.delete_file(ROT_INTENT_NAME);
-                Ok(Some(format!("rotation rolled FORWARD ({} db)", db_names.len())))
+                Ok(Some(format!(
+                    "rotation rolled FORWARD ({} db, {} anchor)",
+                    db_names.len(),
+                    anchors.len()
+                )))
             }
             Err(_) => {
                 // Pre-commit line (intent sealed under a DEK we don't hold): roll BACK.
@@ -2371,16 +2394,76 @@ fn shadow_name(name: &str) -> String {
     format!("{name}{ROT_SHADOW_SUFFIX}")
 }
 
-// Parse the rotation intent record's DB-name list (framing produced by `stage_rotation`):
-// `old_gen(8) | new_gen(8) | [len(1) | utf8-name]...`. The generations are advisory (the envelope
-// swap is the real barrier); only the names drive the roll-forward file replacement.
-fn parse_rotation_intent(plain: &[u8]) -> Result<Vec<String>> {
-    if plain.len() < 16 {
-        return Err(OpfsSAHError::Generic("rotate intent truncated".into()));
+// Rotation-intent record magic + version. Bumped from the v1 layout (which carried only the DB-name
+// list) to v2, which appends a snapshot of the freshness anchor so the roll-forward can re-establish
+// the peer-attested epoch floor under DEK′ (issue #4 anchor carry-forward). The record is AEAD-sealed
+// under DEK′ and lives only for the duration of a ceremony, so no durable-format migration is needed.
+const ROT_INTENT_MAGIC: &[u8; 4] = b"FRI2";
+
+// Serialize the rotation intent (framing consumed by `parse_rotation_intent`):
+// `MAGIC(4) | old_gen(8) | new_gen(8) | n_names(2) | [len(1)|utf8-name]... | n_anchors(2) |
+//  [uuid(16)|committed(8)|in_flight(8)|epoch_floor(8)]...`. The generations are advisory (the envelope
+// swap is the real barrier); the names drive the file replacement; the anchor snapshot (captured under
+// the OLD DEK at staging time) is re-established under DEK′ on roll-forward so the freshness floor is
+// not lost across rotation.
+fn encode_rotation_intent(
+    old_gen: u64,
+    new_gen: u64,
+    db_names: &[String],
+    anchors: &[AnchorEntry],
+) -> Result<Vec<u8>> {
+    if db_names.len() > u16::MAX as usize || anchors.len() > crate::manifest::ANCHOR_CAP {
+        return Err(OpfsSAHError::Generic("rotate intent too large".into()));
     }
-    let mut names = Vec::new();
-    let mut at = 16usize;
-    while at < plain.len() {
+    let mut b = Vec::new();
+    b.extend_from_slice(ROT_INTENT_MAGIC);
+    b.extend_from_slice(&old_gen.to_le_bytes());
+    b.extend_from_slice(&new_gen.to_le_bytes());
+    b.extend_from_slice(&(db_names.len() as u16).to_le_bytes());
+    for db in db_names {
+        if db.len() > 255 {
+            return Err(OpfsSAHError::Generic(format!("rotate: db name too long: {db:?}")));
+        }
+        b.push(db.len() as u8);
+        b.extend_from_slice(db.as_bytes());
+    }
+    b.extend_from_slice(&(anchors.len() as u16).to_le_bytes());
+    for e in anchors {
+        b.extend_from_slice(&e.uuid);
+        b.extend_from_slice(&e.committed.to_le_bytes());
+        b.extend_from_slice(&e.in_flight.to_le_bytes());
+        b.extend_from_slice(&e.epoch_floor.to_le_bytes());
+    }
+    Ok(b)
+}
+
+// Parse a v2 rotation intent → `(db_names, anchor_snapshot)`. Malformed input (bad magic / truncation)
+// fails closed; because the record is AEAD-authenticated under DEK′ before it reaches here, a parse
+// error means our own record is corrupt, so it propagates rather than being silently ignored.
+fn parse_rotation_intent(plain: &[u8]) -> Result<(Vec<String>, Vec<AnchorEntry>)> {
+    let trunc = || OpfsSAHError::Generic("rotate intent truncated".into());
+    if plain.len() < 4 || &plain[0..4] != ROT_INTENT_MAGIC {
+        return Err(OpfsSAHError::Generic("rotate intent bad magic/version".into()));
+    }
+    let mut at = 4usize;
+    if at + 16 > plain.len() {
+        return Err(trunc());
+    }
+    at += 16; // old_gen | new_gen (advisory)
+    let take_u16 = |at: &mut usize, p: &[u8]| -> Result<usize> {
+        if *at + 2 > p.len() {
+            return Err(OpfsSAHError::Generic("rotate intent truncated".into()));
+        }
+        let v = u16::from_le_bytes([p[*at], p[*at + 1]]) as usize;
+        *at += 2;
+        Ok(v)
+    };
+    let n_names = take_u16(&mut at, plain)?;
+    let mut names = Vec::with_capacity(n_names);
+    for _ in 0..n_names {
+        if at >= plain.len() {
+            return Err(trunc());
+        }
         let len = plain[at] as usize;
         at += 1;
         if at + len > plain.len() {
@@ -2391,7 +2474,26 @@ fn parse_rotation_intent(plain: &[u8]) -> Result<Vec<String>> {
         names.push(name.to_string());
         at += len;
     }
-    Ok(names)
+    let n_anchors = take_u16(&mut at, plain)?;
+    if n_anchors > crate::manifest::ANCHOR_CAP {
+        return Err(OpfsSAHError::Generic("rotate intent anchor count too large".into()));
+    }
+    let mut anchors = Vec::with_capacity(n_anchors);
+    for _ in 0..n_anchors {
+        if at + 40 > plain.len() {
+            return Err(trunc());
+        }
+        let mut uuid = [0u8; 16];
+        uuid.copy_from_slice(&plain[at..at + 16]);
+        anchors.push(AnchorEntry {
+            uuid,
+            committed: u64::from_le_bytes(plain[at + 16..at + 24].try_into().unwrap()),
+            in_flight: u64::from_le_bytes(plain[at + 24..at + 32].try_into().unwrap()),
+            epoch_floor: u64::from_le_bytes(plain[at + 32..at + 40].try_into().unwrap()),
+        });
+        at += 40;
+    }
+    Ok((names, anchors))
 }
 
 // The only pool file names a legitimate export can produce: `<base>.db` or `<base>.db#manifest`,
@@ -2872,6 +2974,12 @@ impl OpfsSAHPoolUtil {
     #[cfg(feature = "testing-api")]
     pub fn active_anchor_slot(&self) -> usize {
         self.pool.active_anchor_slot()
+    }
+
+    /// issue #4 (anchor carry-forward): the decoded freshness anchor entries under this pool's DEK.
+    #[cfg(feature = "testing-api")]
+    pub fn anchor_entries(&self) -> Vec<crate::manifest::AnchorEntry> {
+        self.pool.anchor_entries()
     }
 
     /// ENC (H1 test-rig): snapshot / restore the raw on-disk anchor bytes (attacker replay).

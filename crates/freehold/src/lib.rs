@@ -839,6 +839,91 @@ async fn rotate_barrier_test() -> std::result::Result<String, String> {
     )
 }
 
+/// Section RK3 — DEK rotation, ANCHOR CARRY-FORWARD (issue #4). The freshness anchor (per-uuid
+/// `committed` high-water + STRICT peer-attested `epoch_floor`) is sealed under `anchor_key = HKDF(DEK)`,
+/// so DEK′ cannot read the pre-rotation anchor; without an explicit carry the first post-rotation open
+/// finds no entry and the strict epoch floor silently resets to 0 (a rollback window). This proves the
+/// carry: a floor raised under DEK is captured into the (DEK′-sealed) intent at staging and
+/// re-established under DEK′ on roll-forward, with the data still intact and no false rollback on open.
+#[cfg(feature = "testing-api")]
+async fn rotate_anchor_carry_test() -> std::result::Result<String, String> {
+    const RDB: &str = "rotc.db";
+    const VFS: &str = "rot-carry";
+    const DIR: &str = "rot-carry";
+    let mut new_dek = DEK_OK;
+    new_dek[1] ^= 0xff;
+    new_dek[30] ^= 0x0f;
+    let dbs = vec![RDB.to_string()];
+
+    // Device under DEK_OK: create + populate, close the handle (staging reads ciphertext at rest).
+    let a = install_dir(VFS, DIR, true, &DEK_OK).await?;
+    unsafe {
+        let db = open_default(RDB)?;
+        set_pragmas(db)?;
+        exec(db, "CREATE TABLE t(v TEXT)")?;
+        exec(db, "INSERT INTO t(v) VALUES ('carry')")?;
+        ffi::sqlite3_close(db);
+    }
+    // Raise a STRICT peer-attested epoch floor: mint this device's epoch for the DB's current
+    // generation and apply it (sets committed AND the no-slack epoch_floor in the anchor).
+    let tok = a.export_epoch(RDB, 0).map_err(|e| format!("RK3 export_epoch: {e:?}"))?;
+    let (floor, _) = a.apply_epoch(&tok).map_err(|e| format!("RK3 apply_epoch: {e:?}"))?;
+    if floor == 0 {
+        return Err("RK3: precondition — epoch floor did not advance past 0".into());
+    }
+    let uuid = a
+        .anchor_entries()
+        .into_iter()
+        .find(|e| e.epoch_floor == floor)
+        .map(|e| e.uuid)
+        .ok_or_else(|| "RK3: pre-rotation anchor is missing the epoch floor".to_string())?;
+
+    // Stage + commit the rotation (roll FORWARD under DEK′), exactly as the ceremony does.
+    a.stage_rotation(&new_dek, &dbs, 1, 2).map_err(|e| format!("RK3 stage: {e:?}"))?;
+    a.pause_vfs().map_err(|e| format!("RK3 pause a: {e:?}"))?;
+    let b = install_dir(VFS, DIR, false, &new_dek).await?;
+    let note = b.recover_rotation().map_err(|e| format!("RK3 recover: {e:?}"))?;
+    if !note.as_deref().unwrap_or_default().contains("FORWARD") {
+        return Err(format!("RK3: expected roll-FORWARD, got {note:?}"));
+    }
+
+    // THE CARRY: the DEK′ anchor must now hold the SAME uuid with the SAME strict epoch_floor and a
+    // committed high-water no lower than before. Pre-fix, this entry would be absent (floor reset to 0).
+    let carried = b
+        .anchor_entries()
+        .into_iter()
+        .find(|e| e.uuid == uuid)
+        .ok_or_else(|| "RK3: post-rotation anchor lost the DB entry — floor NOT carried".to_string())?;
+    if carried.epoch_floor != floor {
+        return Err(format!(
+            "RK3: epoch floor not carried — before {floor}, after {}",
+            carried.epoch_floor
+        ));
+    }
+    if carried.committed < floor {
+        return Err(format!(
+            "RK3: committed high-water regressed across rotation ({} < {floor})",
+            carried.committed
+        ));
+    }
+    // And the DB still opens + reads under DEK′ (the carried floor must not trip a false rollback).
+    let v = unsafe {
+        let db = open_default(RDB).map_err(|e| format!("RK3 open under dek': {e:?}"))?;
+        let v = scalar_text(db, "SELECT v FROM t LIMIT 1").ok();
+        ffi::sqlite3_close(db);
+        v
+    };
+    if v.as_deref() != Some("carry") {
+        return Err("RK3: data lost across rotation".into());
+    }
+    b.pause_vfs().map_err(|e| format!("RK3 pause b: {e:?}"))?;
+
+    Ok(
+        "RK3. DEK rotation (anchor carry-forward): a strict peer-attested epoch floor + committed high-water set under DEK survive the rotation \u{2014} captured into the DEK\u{2032}-sealed intent and re-established under DEK\u{2032} on roll-forward (no silent freshness-floor reset), data intact \u{2705}"
+            .to_string(),
+    )
+}
+
 /// Section S — the session model, driven exactly as the SDK drives it but with a MOCK PRF (no
 /// gesture): open → typed parameterized SQL on named DBs → isolation → strict-name and
 /// multi-statement-with-params rejection → lock kills ops → reopen sees the data. Runs on its own
@@ -2191,6 +2276,10 @@ async fn run() -> std::result::Result<String, String> {
 
     // ---- Section RK2: DEK rotation, crash-safe commit barrier (issue #4 / D-RK4, increment 2) -----
     r.push_str(&rotate_barrier_test().await?);
+    r.push('\n');
+
+    // ---- Section RK3: DEK rotation, anchor carry-forward (issue #4, freshness-floor preservation) --
+    r.push_str(&rotate_anchor_carry_test().await?);
     r.push('\n');
 
     // ---- Section SJ: the SDK-facing session sync ops (wasm boundary the @freehold/db worker uses) -

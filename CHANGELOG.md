@@ -42,6 +42,12 @@ audit and a real cross-browser/device pass**, not on feature completeness. Until
   pool-capacity API for vendoring consumers.
 
 ### Changed
+- **DEK rotation now carries the freshness anchor forward.** A strict, peer-attested `epoch_floor`
+  (and the `committed` high-water) set before a rotation is preserved across it: the pre-rotation anchor
+  is snapshotted into the DEK′-sealed rotation-intent record and re-established under DEK′ on roll-forward,
+  instead of silently resetting to 0. Closes a one-generation rollback window that a cross-device epoch
+  had previously closed. The rotation-intent record format is bumped to v2 (ephemeral; no on-disk
+  migration). Proven by `run_tests` RK3.
 - `session_export` no longer relies on the session's open-time envelope snapshot — it embeds the
   current (rollback-guarded) envelope, so a recovery/passkey added mid-session is included in exports.
 

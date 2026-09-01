@@ -87,13 +87,15 @@ Each is stated with **where enforced** and **where tested**. An auditor should t
    leaked `'static` that survives until the worker dies — a locked session can't reach it (no VFS, no
    handles); documented in `vfs.rs` `session_lock_inner` and BUILD-NOTES.
 9. **Rotation evicts** — post-rotation the old DEK opens nothing that survives; old methods orphaned
-   (re-admit = re-enroll). — tested: **M3c**, **RK**, **RK2**, `tests/rotate-e2e.spec.js`.
+   (re-admit = re-enroll). A strict peer-attested `epoch_floor` set before rotation is **carried
+   forward** (snapshotted into the DEK′-sealed intent, re-established under DEK′ on roll-forward), not
+   reset — tested: **M3c**, **RK**, **RK2**, **RK3** (anchor carry-forward), `tests/rotate-e2e.spec.js`.
 10. **Server-blind** — bundle/sync carry only ciphertext + non-secret metadata. — `bundle.rs`,
     `sync.rs`; tested: **SJ**, `tests/sync-e2e.spec.js`, ciphertext audit.
 
 ## 5. Test coverage matrix
 - **In-wasm `run_tests()`** (`lib.rs`, gated behind `testing-api`; run via `tests/merkle-root.spec.js`):
-  sections M2 (block device/crypto), M3b (envelope anti-rollback), M3c/RK/RK2 (DEK rotation), M3d
+  sections M2 (block device/crypto), M3b (envelope anti-rollback), M3c/RK/RK2/RK3 (DEK rotation), M3d
   (recovery checksum), MK (full-state Merkle root + crash injection), SE/SE3c (sync-epoch rollback),
   SY/SJ (sync engine + SDK boundary), S (session model), §14.8 crash sweep, perf.
 - **Playwright E2E** (real WebAuthn virtual authenticator): `merkle-root` (full suite gate),
