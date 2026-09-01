@@ -32,20 +32,27 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
-use vfs::{install, OpfsSAHPoolCfgBuilder, OpfsSAHPoolUtil};
+use vfs::{OpfsSAHPoolCfgBuilder, OpfsSAHPoolUtil};
 use wasm_bindgen::prelude::*;
 
 // Demo DEKs. Stand-ins for the passkey-PRF-derived key (design-spec §11 / topic M2).
+#[cfg(feature = "testing-api")]
 const DEK_OK: [u8; 32] = [
     0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18, 0x29, 0x3a, 0x4b, 0x5c, 0x6d, 0x7e, 0x8f, 0x90,
     0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00,
 ];
+#[cfg(feature = "testing-api")]
 const DEK_BAD: [u8; 32] = [0xff; 32];
 
+#[cfg(feature = "testing-api")]
 const SECRET: &str = "topsecret-plaintext-canary-42";
+#[cfg(feature = "testing-api")]
 const SECRET2: &str = "attached-db-canary-77";
+#[cfg(feature = "testing-api")]
 const DB_NAME: &str = "app.db";
+#[cfg(feature = "testing-api")]
 const MANIFEST: &str = "app.db#manifest";
+#[cfg(feature = "testing-api")]
 const DIR: &str = "enc-m2";
 
 unsafe fn open_default(name: &str) -> std::result::Result<*mut ffi::sqlite3, String> {
@@ -75,6 +82,7 @@ unsafe fn open_default(name: &str) -> std::result::Result<*mut ffi::sqlite3, Str
     Ok(db)
 }
 
+// Shared by set_pragmas (production) and the test harness — NOT gated.
 unsafe fn exec(db: *mut ffi::sqlite3, sql: &str) -> std::result::Result<(), String> {
     let csql = CString::new(sql).unwrap();
     let mut err: *mut c_char = ptr::null_mut();
@@ -93,6 +101,7 @@ unsafe fn exec(db: *mut ffi::sqlite3, sql: &str) -> std::result::Result<(), Stri
     Err(format!("rc={rc} xrc={xrc} {msg}"))
 }
 
+#[cfg(feature = "testing-api")]
 unsafe fn scalar_i64(db: *mut ffi::sqlite3, sql: &str) -> std::result::Result<i64, String> {
     let csql = CString::new(sql).unwrap();
     let mut stmt = ptr::null_mut();
@@ -110,6 +119,7 @@ unsafe fn scalar_i64(db: *mut ffi::sqlite3, sql: &str) -> std::result::Result<i6
     out
 }
 
+#[cfg(feature = "testing-api")]
 unsafe fn scalar_text(db: *mut ffi::sqlite3, sql: &str) -> std::result::Result<String, String> {
     let csql = CString::new(sql).unwrap();
     let mut stmt = ptr::null_mut();
@@ -138,6 +148,7 @@ unsafe fn set_pragmas(db: *mut ffi::sqlite3) -> std::result::Result<(), String> 
     Ok(())
 }
 
+#[cfg(feature = "testing-api")]
 fn cfg(name: &str, clear: bool) -> vfs::OpfsSAHPoolCfg {
     OpfsSAHPoolCfgBuilder::new()
         .vfs_name(name)
@@ -147,16 +158,18 @@ fn cfg(name: &str, clear: bool) -> vfs::OpfsSAHPoolCfg {
         .build()
 }
 
+#[cfg(feature = "testing-api")]
 async fn install_key(
     name: &str,
     clear: bool,
     dek: &[u8; 32],
 ) -> std::result::Result<OpfsSAHPoolUtil, String> {
-    install::<ffi::WasmOsCallback>(&cfg(name, clear), true, dek)
+    vfs::install::<ffi::WasmOsCallback>(&cfg(name, clear), true, dek)
         .await
         .map_err(|e| format!("install {name}: {e:?}"))
 }
 
+#[cfg(feature = "testing-api")]
 fn cross_origin_isolated() -> bool {
     js_sys::global()
         .dyn_into::<js_sys::Object>()
@@ -166,6 +179,7 @@ fn cross_origin_isolated() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(feature = "testing-api")]
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() || haystack.len() < needle.len() {
         return false;
@@ -175,6 +189,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 
 /// §14.6 + §17.G negative test: every file the pool holds must contain neither the SQLite magic
 /// nor any plaintext canary anywhere in its raw data region.
+#[cfg(feature = "testing-api")]
 fn audit_all(util: &OpfsSAHPoolUtil, label: &str) -> std::result::Result<String, String> {
     let mut out = String::new();
     for f in util.list() {
@@ -195,6 +210,7 @@ fn audit_all(util: &OpfsSAHPoolUtil, label: &str) -> std::result::Result<String,
 }
 
 /// Open with the correct key and count rows in `t` — used to prove recovery after each attack test.
+#[cfg(feature = "testing-api")]
 unsafe fn count_rows() -> std::result::Result<i64, String> {
     let db = open_default(DB_NAME)?;
     let n = scalar_i64(db, "SELECT count(*) FROM t");
@@ -202,6 +218,7 @@ unsafe fn count_rows() -> std::result::Result<i64, String> {
     n
 }
 
+#[cfg(feature = "testing-api")]
 fn dir_cfg(vfs_name: &str, dir: &str, clear: bool) -> vfs::OpfsSAHPoolCfg {
     OpfsSAHPoolCfgBuilder::new()
         .vfs_name(vfs_name)
@@ -210,6 +227,7 @@ fn dir_cfg(vfs_name: &str, dir: &str, clear: bool) -> vfs::OpfsSAHPoolCfg {
         .initial_capacity(6)
         .build()
 }
+#[cfg(feature = "testing-api")]
 async fn install_dir(
     vfs_name: &str,
     dir: &str,
@@ -224,6 +242,7 @@ async fn install_dir(
 /// Sync-epoch anchor test (sync-epoch-design §6): a peer's epoch raises this device's freshness
 /// high-water mark, so a later rollback below it is REFUSED — and the contrast device (no epoch)
 /// shows the rollback would otherwise slip through. Two "devices" = two independent pool dirs.
+#[cfg(feature = "testing-api")]
 async fn sync_epoch_test() -> std::result::Result<String, String> {
     const SDB: &str = "sync.db";
     // ---- Device A: commit to a high generation; snapshot an EARLY (stale) image + a LATE epoch ----
@@ -300,6 +319,7 @@ with NO epoch opens the same stale image → the peer epoch is exactly what prev
 /// (which would re-plant a revoked slot) is then refused at `session_open` — even though it never
 /// locally witnessed the newer envelope. This exercises the REAL enforcement path (session_begin),
 /// not just the token round-trip. Contrast: a matching epoch (or none) opens the same envelope.
+#[cfg(feature = "testing-api")]
 async fn sync_envelope_epoch_test() -> std::result::Result<String, String> {
     const SEDB: &str = "seenv.db";
     let prf: [u8; 32] = [11u8; 32]; // synthetic passkey PRF for this device's slot
@@ -372,6 +392,7 @@ an evicted device \u{2705}"
 /// Export DB `db_name` from `util`'s pool as `.freehold` bundle bytes (the sync blob `image`).
 /// `export_bundle` yields `name|hex` text of the encrypted files; we re-encode those into the real
 /// binary TLV bundle (`bundle.rs`) — no envelope/cred_id/epoch section (sync carries only the image).
+#[cfg(feature = "testing-api")]
 fn export_image(util: &OpfsSAHPoolUtil, db_name: &str) -> std::result::Result<Vec<u8>, String> {
     let text = util
         .export_bundle(db_name)
@@ -387,6 +408,7 @@ fn export_image(util: &OpfsSAHPoolUtil, db_name: &str) -> std::result::Result<Ve
 
 /// Inverse of [`export_image`]: decode a `.freehold` bundle and write its ciphertext files into
 /// `util`'s pool via `import_files`. Opening them still needs the DEK.
+#[cfg(feature = "testing-api")]
 fn import_image(util: &OpfsSAHPoolUtil, image: &[u8]) -> std::result::Result<(), String> {
     let b = bundle::decode(image).map_err(|e| format!("bundle decode: {e}"))?;
     util.import_files(&b.files)
@@ -399,6 +421,7 @@ fn import_image(util: &OpfsSAHPoolUtil, image: &[u8]) -> std::result::Result<(),
 ///
 /// All three devices share `DEK_OK` (single-user model: every device holds the DEK). Each device
 /// has its own random 16-byte `device_id`. One logical DB (fixed test `db_uuid`) → one `sync_id`.
+#[cfg(feature = "testing-api")]
 async fn sync_test() -> std::result::Result<String, String> {
     use sync::{reconcile, InMemoryRelay, MergeOutcome, SyncBlob, VersionVector};
     const SYDB: &str = "sy.db";
@@ -629,6 +652,7 @@ async fn sync_test() -> std::result::Result<String, String> {
 /// image under the OLD DEK does NOT yield the data — the old key is now useless against the rotated
 /// database, which is the whole point of eviction. (The envelope half is proven by M3c; the two halves
 /// are stitched into one atomic ceremony + commit barrier in increment 2.)
+#[cfg(feature = "testing-api")]
 async fn rekey_test() -> std::result::Result<String, String> {
     const RKDB: &str = "rk.db";
     // A fresh DEK guaranteed distinct from DEK_OK.
@@ -699,6 +723,7 @@ async fn rekey_test() -> std::result::Result<String, String> {
 /// commit rolls BACK (old DEK still reads the old data, staging is GC'd); a crash AFTER rolls FORWARD
 /// (new DEK reads the data, and it is idempotent); and the rolled-forward DB no longer opens under the
 /// OLD DEK — eviction, end to end.
+#[cfg(feature = "testing-api")]
 async fn rotate_barrier_test() -> std::result::Result<String, String> {
     const RDB: &str = "rotb.db";
     const VFS: &str = "rot-barrier";
@@ -803,6 +828,7 @@ async fn rotate_barrier_test() -> std::result::Result<String, String> {
 /// gesture): open → typed parameterized SQL on named DBs → isolation → strict-name and
 /// multi-statement-with-params rejection → lock kills ops → reopen sees the data. Runs on its own
 /// pool dir so it never touches a real enrollment in `enc-passkey`.
+#[cfg(feature = "testing-api")]
 async fn session_test() -> std::result::Result<String, String> {
     let js = |e: JsValue| e.as_string().unwrap_or_else(|| format!("{e:?}"));
     let prf: [u8; 32] = [21u8; 32]; // stand-in for the WebAuthn PRF assertion output
@@ -879,6 +905,7 @@ reopen → data intact \u{2705}\n"
         .into())
 }
 
+#[cfg(feature = "testing-api")]
 async fn run() -> std::result::Result<String, String> {
     let mut r = String::new();
     r.push_str("freehold Milestones 2+3 — anti-rollback + hardening + crash-injection/perf tests\n");
@@ -2171,6 +2198,7 @@ fn install_panic_hook() {
     console_error_panic_hook::set_once();
 }
 
+#[cfg(feature = "testing-api")]
 #[wasm_bindgen]
 pub async fn run_tests() -> String {
     install_panic_hook();
@@ -3018,6 +3046,7 @@ pub fn sync_reconcile(local_vv: &[u8], incoming_vv: &[u8]) -> Result<JsValue, Js
 /// derivation, seal→open round-trip, version-vector helpers + reconcile agreeing with the engine, and
 /// apply reopening cleanly. The multi-device ORDERING/FORK semantics themselves are proven in SY over
 /// fresh pools; this proves the thin session wrappers on top of them.
+#[cfg(feature = "testing-api")]
 async fn sync_session_test() -> std::result::Result<String, String> {
     let prf: [u8; 32] = [37u8; 32]; // stand-in for a WebAuthn-PRF assertion
     let blob = envelope::create_envelope(&DEK_OK, &prf).map_err(|e| format!("SJ create_envelope: {e:?}"))?;
