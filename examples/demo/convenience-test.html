@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8" /><title>freehold convenience-tier E2E harness</title></head>
+<body>
+<!-- Headless E2E harness for the convenience (device-key) tier. Exposes the SDK on window.fh so the
+     Playwright spec can drive enrollConvenience / unlock / sql without a passkey gesture. Test infra,
+     not a demo UI. -->
+<script type="module">
+import { FreeholdVault } from '../../packages/db/index.js';
+let vault = null;
+window.fh = {
+  async open() {
+    const wasmUrl = new URL('./pkg/freehold.js', location.href);
+    vault = await FreeholdVault.open({ wasmUrl, rpName: 'freehold convenience test' });
+    return true;
+  },
+  enrollConvenience: (o) => vault.enrollConvenience(o),
+  isConvenience: () => vault.isConvenience(),
+  isEnrolled: () => vault.isEnrolled(),
+  needsBackup: () => vault.needsBackup(),
+  hasRecoveryMethod: () => vault.hasRecoveryMethod(),
+  unlock: () => vault.unlock(),
+  unlockWithRecovery: (code) => vault.unlockWithRecovery(code),
+  isUnlocked: () => vault.isUnlocked(),
+  sql: (q, p, db) => vault.sql(q, p, db),
+  lock: () => vault.lock(),
+  close: () => { if (vault) { vault.close(); vault = null; } },
+  reset: () => vault.reset(),
+};
+window.fhReady = true;
+</script>
+</body>
+</html>

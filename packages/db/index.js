@@ -296,6 +296,18 @@ export class FreeholdVault {
     return prf;
   }
 
+  // CONVENIENCE TIER (docs/convenience-tier-design.md): if this device has a device-key record,
+  // unwrap the 32-byte secret S from the non-extractable WebCrypto key in IndexedDB and return it as a
+  // transferable buffer (the caller detaches it into the worker). S is treated exactly like a passkey
+  // PRF output — it opens the same envelope slot. Returns null when this is not a convenience vault.
+  async #deviceSecret() {
+    const key = await idbGet('deviceKey');
+    const wrap = await idbGet('deviceWrap');
+    if (!key || !wrap) return null;
+    const s = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: wrap.iv }, key, wrap.ct);
+    return new Uint8Array(s);
+  }
+
   /** Register a passkey, wrap a fresh DEK under its PRF-KEK, initialize an empty vault. Persists
    *  the envelope + credential id in IndexedDB. Create your schema via sql() after unlock(). */
   async enroll() {
@@ -310,6 +322,47 @@ export class FreeholdVault {
     await idbDel('env_floor');      // fresh vault — clear any stale floor, then seed from gen 1
     await this.#bumpFloor(envelope);
     return { credId };
+  }
+
+  /** CONVENIENCE TIER — enroll a zero-friction, device-key vault (no passkey). A random 32-byte secret
+   *  S wraps a fresh DEK (S is used exactly as a passkey PRF would be), and S itself is stored ONLY
+   *  wrapped under a non-extractable WebCrypto key in IndexedDB — device-bound and non-readable by JS,
+   *  but usable without a user gesture, so `unlock()` needs no prompt. This is an EXPLICIT, weaker tier
+   *  than the passkey path (a same-origin script while the device key exists can auto-unlock) — for
+   *  everyday, non-critical data. See docs/convenience-tier-design.md §2 for the honest boundary.
+   *
+   *  `{ backup = true }` also mints a recovery code (returned once) so a storage wipe / new device isn't
+   *  data loss — a device key dies with the device. Pass `backup:false` only for truly throwaway data.
+   *  Resolves to the recovery code (or null when backup is off). */
+  async enrollConvenience({ backup = true } = {}) {
+    await this.lock(); // re-initializes the pool — a live session would hold its handles
+    const deviceKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    const iv = rand(12);
+    let S = rand(32);
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, deviceKey, S));
+    let envelope = await this.#call('enroll', [S], [S.buffer]); // S treated as a PRF output, then detached
+    S = null;
+    await idbSet('deviceKey', deviceKey);       // CryptoKey stored by reference (non-extractable)
+    await idbSet('deviceWrap', { iv, ct });
+    await idbSet('envelope', envelope);
+    await idbDel('credId');                     // a pure-device vault has no passkey credential
+    await idbDel('epoch');
+    await idbDel('env_floor');
+    await this.#bumpFloor(envelope);
+    if (!backup) return null;
+    // Durability: mint a recovery code, authorized by the device secret (unwrapped from the device key).
+    const code = await this.generateRecoveryCode();
+    let S2 = await this.#deviceSecret();
+    envelope = await this.#call('add_recovery', [S2, code, envelope], [S2.buffer]);
+    S2 = null;
+    await idbSet('envelope', envelope);
+    await this.#bumpFloor(envelope);
+    return code;
+  }
+
+  /** Is this a convenience (device-key) vault — i.e. does `unlock()` auto-open without a gesture? */
+  async isConvenience() {
+    return !!(await idbGet('deviceKey'));
   }
 
   /** Has this device an envelope (via enroll() or importBundle())? */
@@ -337,9 +390,13 @@ export class FreeholdVault {
    *  until lock(), so sql()/exportBundle() need no further prompts. */
   async unlock() {
     const envelope = await this.#envelope();
-    let prf = await this.#prf();
-    await this.#call('session_open', [prf, envelope, await this.#epoch()], [prf.buffer]);
-    prf = null;
+    const epoch = await this.#epoch();
+    // Convenience tier: a device-key vault auto-unlocks with the device-held secret (no gesture).
+    // Otherwise assert the passkey. Either way the secret is transferred (detached) into the worker.
+    let secret = await this.#deviceSecret();
+    if (!secret) secret = await this.#prf();
+    await this.#call('session_open', [secret, envelope, epoch], [secret.buffer]);
+    secret = null;
     this.#touch();
   }
 
@@ -622,6 +679,8 @@ export class FreeholdVault {
     await idbDel('credId');
     await idbDel('epoch');
     await idbDel('env_floor');
+    await idbDel('deviceKey');   // convenience-tier device key + wrapped secret
+    await idbDel('deviceWrap');
     // Forget sync lineage too (the DB is being forgotten). deviceId is kept — it's a stable identity.
     await idbDel('syncVv');
     await idbDel('syncCursor');

@@ -85,8 +85,18 @@ export declare class FreeholdVault {
    *  in IndexedDB. Create your schema via sql() after unlock(). */
   enroll(): Promise<{ credId: Uint8Array }>;
 
+  /** CONVENIENCE TIER — enroll a zero-friction device-key vault (no passkey): unlock() then auto-opens
+   *  with no gesture. A 32-byte secret wraps the DEK and is stored only under a non-extractable WebCrypto
+   *  key (device-bound, JS-non-extractable) — an explicit, weaker tier for everyday data. `{ backup }`
+   *  (default true) also mints a recovery code (returned) so a storage wipe isn't data loss. Resolves to
+   *  the recovery code, or null when backup is off. See docs/convenience-tier-design.md. */
+  enrollConvenience(opts?: { backup?: boolean }): Promise<string | null>;
+
   /** Whether an envelope is stored on this device (via enroll() or importBundle()). */
   isEnrolled(): Promise<boolean>;
+
+  /** Whether this is a convenience (device-key) vault — i.e. unlock() auto-opens without a gesture. */
+  isConvenience(): Promise<boolean>;
 
   /** Assert the passkey ONCE and open a session — sql()/exportBundle() then need no prompts
    *  until lock(). */
