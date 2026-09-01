@@ -26,7 +26,9 @@ test('custody: own the data, apps are custodians (grant · tiers · revoke)', as
   page.on('pageerror', (e) => errors.push(e.message));
   await addVirtualAuthenticator(ctx, page);
 
-  await page.goto('/custody.html');
+  // `?e2e` opts into the dev-only broker test hook (window.__custody) — it is otherwise absent, even
+  // in dev, and stripped entirely from any production build. See examples/demo/custody/main.js.
+  await page.goto('/custody.html?e2e=1');
   await expect(page.locator('#vault-log')).toContainText('vault worker up', { timeout: 30_000 });
 
   // Beat 1 — unlock the vault with a passkey.

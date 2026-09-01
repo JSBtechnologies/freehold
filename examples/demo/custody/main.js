@@ -99,8 +99,14 @@ async function setupBrokerAndApps() {
   $('notes-request').disabled = false;
   $('tasks-request').disabled = false;
 
-  // Dev/E2E hook: drive a raw broker call with an explicit grantId (used to prove that a REVOKED
-  // grant is rejected at the broker, not merely disabled in the UI). Not part of the app surface.
+  // Dev/E2E ONLY hook: drives a raw broker call with an explicit grantId, DELIBERATELY bypassing the
+  // consent prompt (used to prove a REVOKED grant is rejected at the broker). Because it escapes the
+  // consent gate it must NEVER exist in a real build, so it is gated twice: stripped from any
+  // production bundle (import.meta.env.DEV) AND off by default in dev unless the page is opened with an
+  // explicit `?e2e` flag. Merely loading the demo never exposes it.
+  const dev = typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.DEV;
+  const optedIn = new URLSearchParams(location.search).has('e2e');
+  if (!(dev && optedIn)) return;
   window.__custody = {
     brokerCall(appId, grantId, cap, args = {}) {
       return new Promise((resolve) => {
