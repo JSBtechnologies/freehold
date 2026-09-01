@@ -1,0 +1,4 @@
+node_modules
+dist
+# The freehold wasm is copied in from ../demo/pkg by copy-pkg.js (predev/prebuild) — not committed twice.
+public/pkg
