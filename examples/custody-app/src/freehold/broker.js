@@ -129,11 +129,18 @@ export class CustodyBroker {
         return { data: { ok: true }, detail: 'cleared own notes (vault-only)' };
       } },
 
-      // tier 2 — attestation: return the FACT, withhold the data.
-      'profile.attest.over18': { tier: 2, run: async () => {
+      // tier 2 — attestation: return the FACT, withhold the data. The fact is SIGNED by the vault's
+      // Ed25519 identity key and bound to the app's challenge (audience), so the app verifies it against
+      // the vault's public key — not the broker's word (data-custody §6/D-DC3; docs/vault-signing-design).
+      'profile.attest.over18': { tier: 2, run: async ({ vault, appId, args }) => {
         const age = ageFrom(await this.#field('dob'));
         const value = age != null && age >= 18;
-        return { data: { claim: 'over18', value }, detail: `attested over18=${value} — DOB withheld` };
+        const audience = String(args.audience || appId);
+        const attestation = await vault.attest(`profile.over18=${value}`, { audience });
+        return {
+          data: { claim: 'over18', value, attestation },
+          detail: `attested over18=${value}, signed by your vault — DOB withheld`,
+        };
       } },
 
       // tier 3 — disclosure: a minimized raw field goes to the app, logged + revocable.

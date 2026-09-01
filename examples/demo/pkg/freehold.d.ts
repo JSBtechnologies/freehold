@@ -78,6 +78,13 @@ export function run_tests(): Promise<string>;
 export function session_active(): boolean;
 
 /**
+ * Sign a tier-2 attestation: `Ed25519(vault_identity, canonical(claim, audience, issued_at, expiry))`.
+ * Returns the 64-byte signature; the SDK assembles the attestation object. `issued_at`/`expiry` are
+ * unix seconds (crossed as f64 — exact through 2⁵³); the core reads no clock. Requires an open session.
+ */
+export function session_attest(claim: string, audience: Uint8Array, issued_at: number, expiry: number): Uint8Array;
+
+/**
  * Export the binary `.freehold` bundle from the LIVE session: envelope + credential id + the
  * encrypted image of every DB in the pool + a freshly minted sync-epoch token. No key inside.
  * Pass an empty `cred_id` slice if there is none to embed (e.g. recovery-only flows). `envelope`
@@ -131,6 +138,12 @@ export function session_sync_open(sealed: Uint8Array): any;
 export function session_sync_seal(db_uuid: Uint8Array, vv: Uint8Array): Uint8Array;
 
 /**
+ * The vault's Ed25519 identity public key (32 bytes) — DEK-derived, safe to publish/register with a
+ * verifier. Requires an open session (the DEK lives only in the session pool).
+ */
+export function session_vault_pubkey(): Uint8Array;
+
+/**
  * Classify incoming vs local → `{ outcome: 'fastforward'|'stale'|'fork', winnerIsIncoming: bool }`.
  */
 export function sync_reconcile(local_vv: Uint8Array, incoming_vv: Uint8Array): any;
@@ -150,6 +163,13 @@ export function sync_vv_increment(vv: Uint8Array, device_id: Uint8Array): Uint8A
  */
 export function sync_vv_merge(a: Uint8Array, b: Uint8Array): Uint8Array;
 
+/**
+ * Verify an attestation signature against a public key — **pure**, no session/DEK. Returns true only if
+ * the signature authenticates the canonical message; the caller separately enforces the time window and
+ * the expected claim/audience/pubkey. A malformed pubkey/sig length yields false (never a panic).
+ */
+export function verify_attestation(pubkey: Uint8Array, claim: string, audience: Uint8Array, issued_at: number, expiry: number, sig: Uint8Array): boolean;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
@@ -167,6 +187,7 @@ export interface InitOutput {
     readonly rotate_dek: (a: number, b: number, c: number, d: number) => any;
     readonly run_tests: () => any;
     readonly session_active: () => number;
+    readonly session_attest: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly session_export: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly session_lock: () => [number, number];
     readonly session_open: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
@@ -176,10 +197,12 @@ export interface InitOutput {
     readonly session_sync_id: (a: number, b: number) => [number, number, number, number];
     readonly session_sync_open: (a: number, b: number) => [number, number, number];
     readonly session_sync_seal: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly session_vault_pubkey: () => [number, number, number, number];
     readonly sync_reconcile: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly sync_vv_empty: () => [number, number];
     readonly sync_vv_increment: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly sync_vv_merge: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly verify_attestation: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => number;
     readonly rust_sqlite_wasm_abort: () => void;
     readonly rust_sqlite_wasm_assert_fail: (a: number, b: number, c: number, d: number) => void;
     readonly rust_sqlite_wasm_calloc: (a: number, b: number) => number;

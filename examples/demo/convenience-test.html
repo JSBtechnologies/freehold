@@ -23,6 +23,11 @@ window.fh = {
   unlockWithRecovery: (code) => vault.unlockWithRecovery(code),
   isUnlocked: () => vault.isUnlocked(),
   listMethods: () => vault.listMethods(),
+  // Vault-signing surface (attestations). Uint8Arrays don't survive the Playwright boundary cleanly, so
+  // specs drive attest+verify inside a single page.evaluate and return only verdicts.
+  vaultPublicKey: () => vault.vaultPublicKey(),
+  attest: (claim, opts) => vault.attest(claim, opts),
+  verifyAttestation: (att, expect) => vault.verifyAttestation(att, expect),
   sql: (q, p, db) => vault.sql(q, p, db),
   // Base64 bridges for crossing the Playwright boundary (D-CV5 export-strip check).
   exportBundleB64: async () => {

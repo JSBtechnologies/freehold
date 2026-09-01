@@ -122,6 +122,12 @@ async function revokeApp(appId) {
 
 async function setField(k, v) { await broker.setField(k, v); }
 
+// Vault-signing surface for relying-party components: a verifier holds only the PUBLIC key + the pure
+// verify (no DEK). vaultPublicKey() models the one-time key registration; verifyAttestation() is the
+// reference check a remote party would run against the documented canonical message.
+async function vaultPublicKey() { return vault.vaultPublicKey(); }
+async function verifyAttestation(att, expect) { return vault.verifyAttestation(att, expect); }
+
 export function useFreehold() {
-  return { state, boot, enroll, enrollConvenience, dismissRecoveryCode, unlock, lock, refresh, client, respondConsent, revokeApp, setField };
+  return { state, boot, enroll, enrollConvenience, dismissRecoveryCode, unlock, lock, refresh, client, respondConsent, revokeApp, setField, vaultPublicKey, verifyAttestation };
 }

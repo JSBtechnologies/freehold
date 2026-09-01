@@ -2003,6 +2003,16 @@ impl OpfsSAHPool {
             .map_err(|e| OpfsSAHError::Generic(format!("strip device slot: {e:?}")))
     }
 
+    // ENC (vault-signing): the vault's Ed25519 identity is DEK-derived, so it lives inside the pool
+    // exactly like every other subkey — the DEK never leaves the worker. `vault_public_key` is safe to
+    // publish; `attest` signs a canonical claim message (docs/vault-signing-design.md).
+    fn vault_public_key(&self) -> [u8; 32] {
+        crate::attest::vault_public_key(&self.dek)
+    }
+    fn attest(&self, claim: &str, audience: &[u8], issued_at: u64, expiry: u64) -> [u8; 64] {
+        crate::attest::attest(&self.dek, claim, audience, issued_at, expiry)
+    }
+
     // ============ ENC (freehold-sync-design §4/§5): sync-layer key material ============
     // Both derive purely from the DEK (no manifest / generation), exactly like `epoch_key` above: the
     // DEK stays inside the pool. Only the opaque 16-byte `sync_id` (a capability, not the key) and
@@ -3057,6 +3067,17 @@ impl OpfsSAHPoolUtil {
     /// Errors if the vault has only device slots. Requires the REAL DEK.
     pub fn strip_export_envelope(&self, envelope: &[u8]) -> Result<Vec<u8>> {
         self.pool.strip_export_envelope(envelope)
+    }
+
+    /// ENC (vault-signing): the vault's DEK-derived Ed25519 identity public key (safe to publish).
+    pub fn vault_public_key(&self) -> [u8; 32] {
+        self.pool.vault_public_key()
+    }
+
+    /// ENC (vault-signing): sign a tier-2 attestation over the canonical claim message. Requires the
+    /// REAL DEK. `issued_at`/`expiry` are unix seconds supplied by the caller (the core reads no clock).
+    pub fn attest(&self, claim: &str, audience: &[u8], issued_at: u64, expiry: u64) -> [u8; 64] {
+        self.pool.attest(claim, audience, issued_at, expiry)
     }
 
     /// ENC (sync-epoch): apply a peer's epoch token — verify + raise the local DB freshness

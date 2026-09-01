@@ -28,6 +28,16 @@ audit and a real cross-browser/device pass**, not on feature completeness. Until
   builds).
 
 ### Added
+- **Verifiable tier-2 attestations (vault signing key)**: a DEK-derived **Ed25519 vault identity**
+  (`HKDF(DEK, "freehold-vault-identity-v1")` — same across a user's devices, never persisted) signs a
+  tier-2 claim ("18+ ✓") bound to a verifier **audience** (anti-replay) and an expiry. A remote party
+  verifies it against the vault **public key** with **no DEK and no PII** — the raw data behind the fact
+  is never transmitted. SDK: `vaultPublicKey()`, `attest(claim, {audience, ttlSeconds})`,
+  `verifyAttestation(att, expect)`. The custody showcase's `profile.attest.over18` now returns a signed
+  attestation the relying party verifies against a pinned key. This lights up data-custody D-DC3's
+  "swappable proof" (DEK-MAC → signature) with **no envelope-format change**. New audited dependency
+  `ed25519-dalek` (`freehold` only; not in the decryptor). Proven by `run_tests` **VS** and
+  `attest-e2e`. See `docs/vault-signing-design.md`.
 - **Convenience tier (device-key unlock)**: opt-in `enrollConvenience()` auto-unlocks a vault on its
   device with no passkey gesture, keying a slot with a 32-byte secret wrapped under a non-extractable
   WebCrypto key (never stored in the clear, never in a bundle). The device slot now carries its own

@@ -25,6 +25,7 @@
 // management API is behind an off-by-default `pool-management` feature (a vendoring consumer opts in;
 // it is NOT in freehold's own shipped surface), and `check_fresh`/`Rollback` stay as real public API.
 
+mod attest;
 mod bundle;
 mod crypto;
 mod envelope;
@@ -1144,6 +1145,48 @@ async fn run() -> std::result::Result<String, String> {
             r.push_str(&format!(
                 "M3e. convenience device slot: opens under S, lists `device` | device-only strip refused | strip drops device slot, keeps recovery, gen {gen_pre} preserved (D-CV5/6/7)\n"
             ));
+        }
+
+        // ---- VS (vault signing: verifiable tier-2 attestations, docs/vault-signing-design.md) --------
+        // The vault identity is DEK-derived: same DEK → same pubkey (deterministic), a different DEK → a
+        // different pubkey. A signed claim verifies under the right pubkey and fails under ANY tamper —
+        // every signed field (claim, audience, issued_at, expiry) is bound, and the wrong key is refused.
+        {
+            let pk = attest::vault_public_key(&DEK_OK);
+            if pk == attest::vault_public_key(&[7u8; 32]) {
+                return Err("VS: different DEKs produced the SAME vault pubkey".into());
+            }
+            if pk != attest::vault_public_key(&DEK_OK) {
+                return Err("VS: vault pubkey is not deterministic for one DEK".into());
+            }
+            let claim = "profile.over18=true";
+            let audience = b"rp:buystuff#chk-42";
+            let (iat, exp) = (1_700_000_000u64, 1_700_000_300u64);
+            let sig = attest::attest(&DEK_OK, claim, audience, iat, exp);
+            if !attest::verify(&pk, claim, audience, iat, exp, &sig) {
+                return Err("VS: a valid attestation failed to verify".into());
+            }
+            if attest::verify(&pk, "profile.over18=false", audience, iat, exp, &sig) {
+                return Err("VS: claim tamper verified".into());
+            }
+            if attest::verify(&pk, claim, b"rp:evil", iat, exp, &sig) {
+                return Err("VS: audience tamper verified".into());
+            }
+            if attest::verify(&pk, claim, audience, iat + 1, exp, &sig) {
+                return Err("VS: issued_at tamper verified".into());
+            }
+            if attest::verify(&pk, claim, audience, iat, exp + 1, &sig) {
+                return Err("VS: expiry tamper verified".into());
+            }
+            if attest::verify(&attest::vault_public_key(&[7u8; 32]), claim, audience, iat, exp, &sig) {
+                return Err("VS: attestation verified under the WRONG vault key".into());
+            }
+            let mut bad = sig;
+            bad[0] ^= 0x01;
+            if attest::verify(&pk, claim, audience, iat, exp, &bad) {
+                return Err("VS: forged signature verified".into());
+            }
+            r.push_str("VS. vault signing: DEK-derived identity (deterministic, DEK-unique) | signed attestation verifies | claim/audience/time/sig/key tamper all rejected\n");
         }
 
         // ---- M3d (recovery-code checksum, issue #1): a generated code self-verifies; a single-symbol
@@ -2968,6 +3011,57 @@ fn session_export_inner(cred_id: &[u8], envelope: &[u8]) -> std::result::Result<
 pub fn session_export(cred_id: &[u8], envelope: &[u8]) -> Result<Vec<u8>, JsValue> {
     install_panic_hook();
     session_export_inner(cred_id, envelope).map_err(|e| JsValue::from_str(&e))
+}
+
+// ---- Vault-signing (docs/vault-signing-design.md): verifiable tier-2 attestations ----
+
+fn with_session<T>(f: impl FnOnce(&vfs::OpfsSAHPoolUtil) -> T) -> std::result::Result<T, String> {
+    SESSION.with(|cell| {
+        let guard = cell.borrow();
+        let s = guard
+            .as_ref()
+            .ok_or_else(|| "no active session — call session_open first".to_string())?;
+        Ok(f(&s.util))
+    })
+}
+
+/// The vault's Ed25519 identity public key (32 bytes) — DEK-derived, safe to publish/register with a
+/// verifier. Requires an open session (the DEK lives only in the session pool).
+#[wasm_bindgen]
+pub fn session_vault_pubkey() -> Result<Vec<u8>, JsValue> {
+    install_panic_hook();
+    with_session(|util| util.vault_public_key().to_vec()).map_err(|e| JsValue::from_str(&e))
+}
+
+/// Sign a tier-2 attestation: `Ed25519(vault_identity, canonical(claim, audience, issued_at, expiry))`.
+/// Returns the 64-byte signature; the SDK assembles the attestation object. `issued_at`/`expiry` are
+/// unix seconds (crossed as f64 — exact through 2⁵³); the core reads no clock. Requires an open session.
+#[wasm_bindgen]
+pub fn session_attest(claim: &str, audience: &[u8], issued_at: f64, expiry: f64) -> Result<Vec<u8>, JsValue> {
+    install_panic_hook();
+    with_session(|util| util.attest(claim, audience, issued_at as u64, expiry as u64).to_vec())
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// Verify an attestation signature against a public key — **pure**, no session/DEK. Returns true only if
+/// the signature authenticates the canonical message; the caller separately enforces the time window and
+/// the expected claim/audience/pubkey. A malformed pubkey/sig length yields false (never a panic).
+#[wasm_bindgen]
+pub fn verify_attestation(
+    pubkey: &[u8],
+    claim: &str,
+    audience: &[u8],
+    issued_at: f64,
+    expiry: f64,
+    sig: &[u8],
+) -> bool {
+    let (Ok(pk), Ok(s)) = (
+        <[u8; 32]>::try_from(pubkey),
+        <[u8; 64]>::try_from(sig),
+    ) else {
+        return false;
+    };
+    attest::verify(&pk, claim, audience, issued_at as u64, expiry as u64, &s)
 }
 
 // issue #4 / D-RK1..4 (DEK rotation, increment 2): the whole ceremony, atomic in the worker. Takes the

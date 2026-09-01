@@ -134,6 +134,13 @@ milestone:
 > where `proof` is a DEK-MAC now and an Ed25519 signature once #7 lands. Nothing above §6 changes when
 > we upgrade — tier-2 verifiable attestations simply light up. Be explicit in docs/UX that until #7,
 > attestations are trust-local, not remotely verifiable.
+>
+> **UPDATE 2026-09-01 — #7 SHIPPED for tier-2 attestations.** The asymmetric half is built: a
+> DEK-derived **Ed25519 vault-identity** key signs tier-2 attestations, verifiable by a remote party
+> against the vault public key with no DEK ([[vault-signing]] / `docs/vault-signing-design.md`). The
+> showcase broker's `profile.attest.over18` now returns a **signed** attestation the relying party
+> verifies against a pinned key. (Grant tokens themselves — §5.4 — remain DEK-MAC for now; the same
+> `{claims, proof}` shape upgrades them the day we want counterparty-verifiable *grants*.)
 
 ## 7. Scoping mechanics on Freehold primitives
 - **Per-app namespace** rides named DBs + per-DB HKDF subkeys (`K_db = HKDF(DEK, "vfs-db-v1"‖uuid)`):
@@ -193,8 +200,11 @@ the split *tangible* (directly answering "how does the split work IRL?"):
   prevent a malicious counterparty from keeping what you *chose* to send.
 - **Tier 4 is a real boundary.** A provider's legally-required record is the provider's; user-custody
   owns the user's copy and user-generated data, not the covered entity's obligations.
-- **Verifiable attestations gate on #7.** Until the signing-key milestone, tier-2 claims are
-  trust-local, not remotely verifiable (D-DC3).
+- **Verifiable attestations gate on #7.** ~~Until the signing-key milestone, tier-2 claims are
+  trust-local~~ **DONE (2026-09-01):** tier-2 claims are now Ed25519-signed by a DEK-derived vault
+  identity and remotely verifiable (D-DC3 update; [[vault-signing]]). *Grant tokens* (§5.4) remain
+  DEK-MAC until counterparty-verifiable grants are needed. Key **registration/PKI** is still out of
+  scope — the verifier must obtain/pin the vault public key (TOFU or a directory).
 - **Requester authentication is only as strong as §5.1.** Origin-only is phishable; the manifest/app-key
   path (D-DC2) is the real defense and must land before untrusted third-party apps are invited.
 - **Availability.** Local-only data dies with the device; durability needs the sealed backup / sync
@@ -211,7 +221,7 @@ the split *tangible* (directly answering "how does the split work IRL?"):
    push + server-streaming receive; opaque bytes.
 5. **Manifest / app-key requester auth** (D-DC2) before opening to untrusted apps.
 6. **Ed25519 vault signing keys (#7)** → verifiable tier-2 attestations light up (D-DC3), no protocol
-   change above §6.
+   change above §6. ✅ **DONE 2026-09-01** ([[vault-signing]]).
 
 ## Cross-links
 [[dek-rotation-design]] (revoke/eviction machinery this rides), [[sync-epoch-design]] (§D-SE2 signing

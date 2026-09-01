@@ -19,6 +19,16 @@ const SYNC_DB_UUID = new TextEncoder().encode('freehold/vault/1');
 
 const rand = (n) => crypto.getRandomValues(new Uint8Array(n));
 
+// Length-then-content byte comparison (constant-time is unnecessary — attestation pubkey/audience are
+// public, not secrets; this is an expectation check, not an auth gate).
+const eqBytes = (a, b) => {
+  const x = new Uint8Array(a), y = new Uint8Array(b);
+  if (x.length !== y.length) return false;
+  for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return false;
+  return true;
+};
+const toBytes = (v) => (typeof v === 'string' ? new TextEncoder().encode(v) : new Uint8Array(v));
+
 // ---- passkey ceremony helpers (exported — apps may drive the ceremony themselves) ----
 
 /** Register a new resident passkey with the PRF extension. Resolves to the raw credential id. */
@@ -520,6 +530,46 @@ export class FreeholdVault {
       const [kekId, kind] = m.split(':');
       return { kekId: Number(kekId), kind };
     });
+  }
+
+  /** The vault's Ed25519 identity public key (32 bytes), DEK-derived and identical across your devices.
+   *  Needs an open session. Publish/register it with a verifier so it can check attestations against your
+   *  key — not your word. See docs/vault-signing-design.md. */
+  async vaultPublicKey() {
+    if (!(await this.isUnlocked())) throw new Error('vault is locked — unlock() before vaultPublicKey()');
+    return this.#call('session_vault_pubkey', []);
+  }
+
+  /** Sign a verifiable tier-2 attestation: a canonical `claim` string signed by the vault identity key,
+   *  bound to an `audience` (a verifier challenge / origin — anti-replay to a different verifier) and a
+   *  validity window (`ttlSeconds`, default 300). Returns the attestation object; a remote party verifies
+   *  it with `vaultPublicKey()` and NO DEK. The raw PII behind the claim is never transmitted. */
+  async attest(claim, { audience = new Uint8Array(0), ttlSeconds = 300 } = {}) {
+    if (!(await this.isUnlocked())) throw new Error('vault is locked — unlock() before attest()');
+    if (typeof claim !== 'string' || !claim) throw new Error('attest: claim must be a non-empty string');
+    const aud = toBytes(audience);
+    const issuedAt = Math.floor(Date.now() / 1000);
+    const expiry = issuedAt + Math.max(1, Math.floor(ttlSeconds));
+    const publicKey = await this.#call('session_vault_pubkey', []);
+    const signature = await this.#call('session_attest', [claim, aud, issuedAt, expiry]);
+    return { v: 1, claim, audience: aud, issuedAt, expiry, publicKey, signature };
+  }
+
+  /** Verify an attestation — PURE (no session/DEK; callable on any open vault instance, even locked).
+   *  Checks the Ed25519 signature, then your expectations: not expired, and (when supplied) the claim /
+   *  audience / publicKey match. `expect.now` is a JS ms timestamp (defaults to Date.now()). Returns
+   *  `{ ok, reason }`. A real remote verifier can equivalently check the documented canonical message
+   *  with any Ed25519 library — this is the reference implementation. */
+  async verifyAttestation(att, expect = {}) {
+    if (!att || att.v !== 1) return { ok: false, reason: 'not a v1 attestation' };
+    const nowSec = Math.floor((expect.now != null ? expect.now : Date.now()) / 1000);
+    if (nowSec >= att.expiry) return { ok: false, reason: 'expired' };
+    if (expect.claim != null && expect.claim !== att.claim) return { ok: false, reason: 'claim mismatch' };
+    if (expect.audience != null && !eqBytes(toBytes(expect.audience), att.audience)) return { ok: false, reason: 'audience mismatch' };
+    if (expect.publicKey != null && !eqBytes(expect.publicKey, att.publicKey)) return { ok: false, reason: 'public key mismatch' };
+    const ok = await this.#call('verify_attestation',
+      [att.publicKey, att.claim, att.audience, att.issuedAt, att.expiry, att.signature]);
+    return ok ? { ok: true } : { ok: false, reason: 'signature invalid' };
   }
 
   /** Run SQL in the open session (unlock() first — no prompt here, that's the point). `params` is

@@ -223,6 +223,30 @@ export function session_active() {
 }
 
 /**
+ * Sign a tier-2 attestation: `Ed25519(vault_identity, canonical(claim, audience, issued_at, expiry))`.
+ * Returns the 64-byte signature; the SDK assembles the attestation object. `issued_at`/`expiry` are
+ * unix seconds (crossed as f64 — exact through 2⁵³); the core reads no clock. Requires an open session.
+ * @param {string} claim
+ * @param {Uint8Array} audience
+ * @param {number} issued_at
+ * @param {number} expiry
+ * @returns {Uint8Array}
+ */
+export function session_attest(claim, audience, issued_at, expiry) {
+    const ptr0 = passStringToWasm0(claim, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(audience, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.session_attest(ptr0, len0, ptr1, len1, issued_at, expiry);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v3;
+}
+
+/**
  * Export the binary `.freehold` bundle from the LIVE session: envelope + credential id + the
  * encrypted image of every DB in the pool + a freshly minted sync-epoch token. No key inside.
  * Pass an empty `cred_id` slice if there is none to embed (e.g. recovery-only flows). `envelope`
@@ -394,6 +418,21 @@ export function session_sync_seal(db_uuid, vv) {
 }
 
 /**
+ * The vault's Ed25519 identity public key (32 bytes) — DEK-derived, safe to publish/register with a
+ * verifier. Requires an open session (the DEK lives only in the session pool).
+ * @returns {Uint8Array}
+ */
+export function session_vault_pubkey() {
+    const ret = wasm.session_vault_pubkey();
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v1;
+}
+
+/**
  * Classify incoming vs local → `{ outcome: 'fastforward'|'stale'|'fork', winnerIsIncoming: bool }`.
  * @param {Uint8Array} local_vv
  * @param {Uint8Array} incoming_vv
@@ -460,6 +499,31 @@ export function sync_vv_merge(a, b) {
     var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
     return v3;
+}
+
+/**
+ * Verify an attestation signature against a public key — **pure**, no session/DEK. Returns true only if
+ * the signature authenticates the canonical message; the caller separately enforces the time window and
+ * the expected claim/audience/pubkey. A malformed pubkey/sig length yields false (never a panic).
+ * @param {Uint8Array} pubkey
+ * @param {string} claim
+ * @param {Uint8Array} audience
+ * @param {number} issued_at
+ * @param {number} expiry
+ * @param {Uint8Array} sig
+ * @returns {boolean}
+ */
+export function verify_attestation(pubkey, claim, audience, issued_at, expiry, sig) {
+    const ptr0 = passArray8ToWasm0(pubkey, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(claim, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passArray8ToWasm0(audience, wasm.__wbindgen_malloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ptr3 = passArray8ToWasm0(sig, wasm.__wbindgen_malloc);
+    const len3 = WASM_VECTOR_LEN;
+    const ret = wasm.verify_attestation(ptr0, len0, ptr1, len1, ptr2, len2, issued_at, expiry, ptr3, len3);
+    return ret !== 0;
 }
 function __wbg_get_imports() {
     const import0 = {
@@ -880,7 +944,7 @@ function __wbg_get_imports() {
             return ret;
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 703, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 716, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__ha22148a4a7c1d5ff);
             return ret;
         },

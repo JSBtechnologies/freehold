@@ -59,6 +59,7 @@ hmac = "0.12"               # HMAC-SHA256 envelope authenticator (v3 anti-rollba
 zeroize = "1"               # Zeroizing scratch buffers / DEK — §17.M
 getrandom = { version = "0.2", features = ["js"] }  # CSPRNG (crypto.getRandomValues) — §8/§17.F
 argon2 = "0.5"              # Argon2id KDF for the recovery-code KEK (M3 envelope) — RustCrypto
+ed25519-dalek = "2"         # Ed25519 vault-identity signing (verifiable tier-2 attestations) — audited (Quarkslab); sign/verify only
 # dev harness only (gated behind the default `panic-hook` feature): surface panic messages in the
 # worker console. Optional so a production `default-features = false` build omits it entirely.
 console_error_panic_hook = { version = "0.1", optional = true }

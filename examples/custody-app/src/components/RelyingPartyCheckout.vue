@@ -23,6 +23,9 @@
         <q-item-section>
           <q-item-label>Age check <q-badge outline class="fh-tier-2 q-ml-xs" label="T2 attest" /></q-item-label>
           <q-item-label caption class="text-grey-5">{{ step.age || 'confirm you are 18+ (DOB stays in the vault)' }}</q-item-label>
+          <q-item-label v-if="step.sig" caption class="q-mt-xs" :class="step.sigOk ? 'text-positive' : 'text-negative'">
+            <q-icon :name="step.sigOk ? 'verified_user' : 'gpp_bad'" size="14px" /> {{ step.sig }}
+          </q-item-label>
         </q-item-section>
         <q-item-section side><q-btn dense outline color="info" label="Verify" :disable="!!step.age" @click="verifyAge" /></q-item-section>
       </q-item>
@@ -56,15 +59,20 @@
 <script setup>
 import { reactive, ref, computed } from 'vue';
 import { useFreehold } from '../freehold/store.js';
-const { client } = useFreehold();
+const { client, vaultPublicKey, verifyAttestation } = useFreehold();
 const busy = ref(false);
 const c = computed(() => client('BuyStuff'));
 const granted = ref(false);
-const step = reactive({ age: '', ship: '', pay: '' });
+const step = reactive({ age: '', ship: '', pay: '', sig: '', sigOk: false });
+
+// BuyStuff acts as the relying party: it pins the vault's public key once (registration), then trusts
+// signed attestations that verify against THAT key — never the broker's word.
+let pinnedKey = null;
 
 async function start() {
   busy.value = true;
   try {
+    pinnedKey = await vaultPublicKey();   // register/pin the vault identity key (TOFU)
     const ok = await c.value.request(
       ['profile.attest.over18', 'profile.read', 'profile.borrow'],
       'verify age, ship, and charge for your order');
@@ -72,8 +80,17 @@ async function start() {
   } finally { busy.value = false; }
 }
 async function verifyAge() {
-  const r = await c.value.call('profile.attest.over18');
+  // Mint a fresh challenge so the attestation is bound to THIS checkout (anti-replay).
+  const challenge = 'buystuff:' + [...crypto.getRandomValues(new Uint8Array(8))].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const r = await c.value.call('profile.attest.over18', { audience: challenge });
   step.age = r.value ? '✓ verified 18+ — your date of birth never left the vault' : '✗ not eligible';
+  // Cryptographically verify the signed fact against the PINNED vault key + our challenge.
+  const v = await verifyAttestation(r.attestation, {
+    claim: `profile.over18=${r.value}`, audience: challenge, publicKey: pinnedKey,
+  });
+  step.sigOk = v.ok;
+  step.sig = v.ok ? 'signature verified against your vault key — trusted, not taken on faith'
+                  : `signature check failed: ${v.reason}`;
 }
 async function getShipping() {
   const r = await c.value.call('profile.read', { fields: ['shipping_addr'] });

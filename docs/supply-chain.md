@@ -41,18 +41,20 @@ vendoring/forking each one through nativelite is worth the effort.**
 ## The inventory — role + nativelite action
 
 ### Tier 1 — crypto trust core · *pure Rust, vendor + reproducible-build (no fork)*
-Audited RustCrypto, used unmodified. Also the **complete dependency set of `freehold-decrypt`**, so
-vendoring Tier 1 yields a fully self-hosted recovery tool. **Clearly worth it.**
+Audited RustCrypto (+ dalek), used unmodified. All of it except `ed25519-dalek` is also the **complete
+dependency set of `freehold-decrypt`**, so vendoring that subset yields a fully self-hosted recovery
+tool. **Clearly worth it.**
 
 | Package | ver | Role in Freehold |
 |---|---|---|
 | `chacha20poly1305` | 0.10.1 | THE cipher — per-block DB encryption, envelope slot-wrapping, `seal_bytes`/`open_bytes` (epoch tokens, rotation intent). |
 | `argon2` | 0.5.3 | Recovery-code KEK (`kek_from_recovery`); params are pinned in *our* code, not the crate. |
-| `hkdf` | 0.12.4 | Every subkey — db/pool/anchor/epoch/sync keys, the MAC key, the passkey-PRF KEK, `sync_id`. |
+| `hkdf` | 0.12.4 | Every subkey — db/pool/anchor/epoch/sync keys, the MAC key, the passkey-PRF KEK, `sync_id`, the vault-identity signing seed. |
 | `sha2` | 0.10.9 | SHA-256 backing HKDF, `file_id`, the Merkle root, the recovery checksum. ⚠️ pin the pure-Rust backend (not asm) for reproducibility. |
 | `hmac` | 0.12.1 | The envelope-wide MAC (anti-rollback authenticator). |
+| `ed25519-dalek` | 2.x | The vault-**identity** signing key (verifiable tier-2 attestations); DEK-derived seed, sign/verify only. Audited (Quarkslab, 2019). **`freehold` only — NOT in `freehold-decrypt`** (attestations never travel in a `.freehold` bundle). |
 | `zeroize` | 1.9.0 | Wipes DEK/KEK/scratch (volatile writes + fences). Keep as-is; don't reimplement. |
-| *transitive* | — | `subtle` (constant-time), `cpufeatures`, `digest`, `crypto-common`, `cipher`, `aead`, `poly1305`, `universal-hash`, `generic-array`, `typenum`, `base64ct`, `password-hash`, … — vendor the closure. |
+| *transitive* | — | `subtle` (constant-time), `cpufeatures`, `digest`, `crypto-common`, `cipher`, `aead`, `poly1305`, `universal-hash`, `generic-array`, `typenum`, `base64ct`, `password-hash`, and (via dalek) `curve25519-dalek`, `ed25519`, `signature`, `curve25519-dalek-derive` … — vendor the closure. |
 
 ### Tier 1b — platform RNG · *vendor + pick the backend per target*
 | `getrandom` | 0.2.17 | The only randomness source (nonces, DEK, salts, recovery entropy). A shim over the platform CSPRNG: `crypto.getRandomValues` on wasm (`js` feature), the OS on the native decryptor. nativelite's job is **backend selection per target**, not a fork. |

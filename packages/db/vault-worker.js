@@ -11,6 +11,8 @@ const OPS = new Set([
   'list_methods', 'envelope_generation', 'import_bundle', 'rotate_dek',
   'session_open', 'session_open_recovery', 'session_lock', 'session_active',
   'session_sql', 'session_export',
+  // Vault signing (docs/vault-signing-design.md): identity pubkey + attest are session-gated; verify is pure.
+  'session_vault_pubkey', 'session_attest', 'verify_attestation',
   // Freehold Sync (freehold-sync-design §10 item 3): crypto + conflict logic in wasm; the loop in JS.
   'session_sync_id', 'session_sync_seal', 'session_sync_open', 'session_sync_apply',
   'sync_vv_empty', 'sync_vv_increment', 'sync_vv_merge', 'sync_reconcile',

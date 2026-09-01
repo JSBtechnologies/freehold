@@ -16,6 +16,26 @@ export interface UnlockMethod {
   kind: 'passkey' | 'recovery' | 'device';
 }
 
+/** A verifiable tier-2 attestation: a claim signed by the vault's Ed25519 identity key. See
+ *  docs/vault-signing-design.md. `issuedAt`/`expiry` are unix seconds; `audience` binds the intended
+ *  verifier (anti-replay). Verify with `FreeholdVault.verifyAttestation` (no DEK needed). */
+export interface Attestation {
+  v: 1;
+  claim: string;
+  audience: Uint8Array;
+  issuedAt: number;
+  expiry: number;
+  publicKey: Uint8Array;
+  signature: Uint8Array;
+}
+
+export interface AttestExpectations {
+  claim?: string;
+  audience?: Uint8Array | string;
+  publicKey?: Uint8Array;
+  now?: number; // JS ms timestamp; defaults to Date.now()
+}
+
 /** Metadata carried by a `.freehold` bundle (fields are empty Uint8Arrays when absent). */
 export interface BundleMeta {
   envelope: Uint8Array;
@@ -125,6 +145,16 @@ export declare class FreeholdVault {
 
   /** List unlock methods on the envelope. */
   listMethods(): Promise<UnlockMethod[]>;
+
+  /** The vault's Ed25519 identity public key (32 bytes), DEK-derived. Needs an open session. */
+  vaultPublicKey(): Promise<Uint8Array>;
+
+  /** Sign a verifiable tier-2 attestation (claim signed by the vault identity key, bound to an audience
+   *  and a TTL). Needs an open session. A remote party verifies it with the public key and no DEK. */
+  attest(claim: string, opts?: { audience?: Uint8Array | string; ttlSeconds?: number }): Promise<Attestation>;
+
+  /** Verify an attestation (pure — no DEK). Checks the signature, expiry, and any supplied expectations. */
+  verifyAttestation(att: Attestation, expect?: AttestExpectations): Promise<{ ok: boolean; reason?: string }>;
 
   /** Run SQL in the open session against named database `db` (default 'app'; [a-z0-9_-]{1,32} —
    *  each name is its own SQLite file). `params` bind `?` placeholders and require a single
