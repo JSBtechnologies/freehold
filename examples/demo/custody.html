@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Freehold — you own the data, apps are custodians</title>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --line:#262b36; --ink:#e6e9ef; --dim:#9aa4b2;
+          --ok:#38c172; --warn:#e3a008; --bad:#ef4444; --accent:#7c9cff; --t1:#38c172; --t2:#7c9cff; --t3:#e3a008; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.5 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  header { padding:18px 24px; border-bottom:1px solid var(--line); }
+  h1 { font-size:18px; margin:0 0 4px; }
+  .sub { color:var(--dim); font-size:13px; }
+  main { max-width:1100px; margin:0 auto; padding:20px 24px 60px; display:grid; gap:16px; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width:820px){ .grid2 { grid-template-columns:1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  .card h2 { font-size:14px; margin:0 0 10px; letter-spacing:.02em; }
+  button { background:#232838; color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:8px 12px; cursor:pointer; font:inherit; }
+  button:hover:not(:disabled){ border-color:var(--accent); }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  button.primary { background:var(--accent); color:#0b0e14; border-color:var(--accent); font-weight:600; }
+  input { background:#0d0f14; color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:8px 10px; font:inherit; }
+  .pill { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; border:1px solid var(--line); }
+  .pill.ok{ color:var(--ok); border-color:var(--ok); } .pill.warn{ color:var(--warn); border-color:var(--warn); }
+  .pill.bad{ color:var(--bad); border-color:var(--bad); }
+  .kv { display:grid; grid-template-columns:110px 1fr; gap:4px 10px; }
+  .kv b { color:var(--dim); font-weight:500; }
+  .muted { color:var(--dim); }
+  .out { margin-top:8px; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12.5px; color:var(--dim); white-space:pre-wrap; min-height:1.4em; }
+  ul.list { list-style:none; margin:8px 0 0; padding:0; }
+  ul.list li { padding:4px 0; border-bottom:1px dashed var(--line); }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--dim); font-weight:500; }
+  .tier { font-weight:700; } .tier1{ color:var(--t1);} .tier2{ color:var(--t2);} .tier3{ color:var(--t3);}
+  #consent { display:none; border-color:var(--accent); }
+  #consent.show { display:block; }
+  .receipt { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:13px; }
+  code { background:#0d0f14; padding:1px 5px; border-radius:5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Freehold — <span class="muted">you own the data, apps are custodians</span></h1>
+  <div class="sub">Your data lives in a passkey-sealed vault on this device. Apps <b>request scoped, revocable access</b> — they never hold a key, never send SQL, and every disclosure is logged in a vault you own. See <code>docs/data-custody-protocol.md</code>.</div>
+</header>
+
+<main>
+  <div class="card">
+    <div class="row">
+      <span>Vault:</span> <span id="state-pill" class="pill warn">no vault</span>
+      <button id="enroll">Enroll (passkey)</button>
+      <button id="unlock" disabled>Unlock</button>
+      <button id="lock" disabled>Lock</button>
+      <button id="reset" title="Forget this device's envelope">Reset</button>
+    </div>
+    <div class="out" id="vault-log">boot…</div>
+  </div>
+
+  <div class="card" id="consent">
+    <h2>⚑ Consent requested</h2>
+    <div id="consent-text" class="receipt"></div>
+    <div class="row" style="margin-top:10px;">
+      <button id="consent-approve" class="primary">Approve</button>
+      <button id="consent-deny">Deny</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Your profile <span class="muted">(owner view — you see everything; apps see only what you grant)</span></h2>
+    <div class="kv" id="profile">
+      <b>name</b><span id="p-name" class="muted">—</span>
+      <b>email</b><span id="p-email" class="muted">—</span>
+      <b>date of birth</b><span id="p-dob" class="muted">—</span>
+      <b>shipping</b><span id="p-ship" class="muted">—</span>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <!-- App A: custodian of its OWN namespace -->
+    <div class="card">
+      <h2>App · Notes <span class="muted">(tier 1 — custodian)</span></h2>
+      <div class="row">
+        <button id="notes-request" class="primary" disabled>Request access</button>
+        <span id="notes-status" class="pill warn">no access</span>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <input id="note-input" placeholder="a private note…" disabled />
+        <button id="note-add" disabled>Add</button>
+      </div>
+      <ul class="list" id="notes-list"></ul>
+    </div>
+
+    <!-- App B: needs facts + a borrow to "complete" its own record -->
+    <div class="card">
+      <h2>App · Tasks &amp; Checkout <span class="muted">(tiers 1·2·3)</span></h2>
+      <div class="row">
+        <button id="tasks-request" class="primary" disabled>Request access</button>
+        <span id="tasks-status" class="pill warn">no access</span>
+        <button id="tasks-revoke" disabled>Revoke this app</button>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <input id="task-input" placeholder="a task…" disabled />
+        <button id="task-add" disabled>Add task</button>
+      </div>
+      <ul class="list" id="tasks-list"></ul>
+      <div style="margin-top:12px; border-top:1px solid var(--line); padding-top:12px;">
+        <div class="muted" style="margin-bottom:6px;">To “complete an order”, the app asks for the minimum:</div>
+        <div class="row">
+          <button id="tasks-over18" disabled>Verify 18+ <span class="muted">(tier 2)</span></button>
+          <button id="tasks-ship" disabled>Get shipping addr <span class="muted">(tier 3)</span></button>
+          <button id="tasks-pay" disabled>Charge via AcmePay <span class="muted">(tier 3 borrow)</span></button>
+        </div>
+        <div class="out" id="tasks-out"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Disclosure ledger <span class="muted">(owned + sealed — who asked what, and why)</span></h2>
+    <div class="receipt" id="apps-receipt">Apps hold <b>0 keys</b> and <b>0 vault data at rest</b>.</div>
+    <table style="margin-top:10px;">
+      <thead><tr><th>when</th><th>app</th><th>tier</th><th>capability</th><th>disclosed / withheld</th></tr></thead>
+      <tbody id="ledger-body"><tr><td colspan="5" class="muted">no disclosures yet</td></tr></tbody>
+    </table>
+  </div>
+</main>
+
+<script type="module" src="./custody/main.js"></script>
+</body>
+</html>
