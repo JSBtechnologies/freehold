@@ -8,8 +8,9 @@
         <q-toolbar-title class="text-weight-bold">
           Freehold <span class="text-grey-6 text-caption q-ml-xs">your data, your terms</span>
         </q-toolbar-title>
-        <q-chip dense square color="dark" text-color="positive" icon="lock" class="fh-mono">
-          unlocked · key stays in the vault
+        <q-chip dense square color="dark" :text-color="state.mode === 'convenience' ? 'warning' : 'positive'"
+                :icon="state.mode === 'convenience' ? 'bolt' : 'lock'" class="fh-mono">
+          {{ state.mode === 'convenience' ? 'convenience · auto-unlock on this device' : 'passkey · key stays in the vault' }}
         </q-chip>
         <q-btn flat dense round icon="lock" class="q-ml-sm" @click="lock">
           <q-tooltip>Lock (drops the key from memory)</q-tooltip>
@@ -43,7 +44,7 @@
 
 <script setup>
 import { useFreehold } from '../freehold/store.js';
-const { lock } = useFreehold();
+const { state, lock } = useFreehold();
 const nav = [
   { to: '/vault', label: 'Your vault', icon: 'shield', hint: 'the data you own' },
   { to: '/apps', label: 'Connected apps', icon: 'apps', hint: 'grants & revoke' },

@@ -21,12 +21,14 @@ class AppClient {
 
 const state = reactive({
   status: 'boot',     // boot | no-vault | locked | unlocked | error
+  mode: null,         // 'hardened' (passkey) | 'convenience' (device key)
   busy: false,
   error: '',
   profile: {},
   apps: [],           // [{ app, scopes, active, purpose, last }]
   ledger: [],         // [{ ts, app, cap, tier, detail }]
   consent: null,      // { appId, scopes, purpose } while a dialog is pending
+  recoveryCode: null, // one-time display after enroll (mandatory-backup contract)
 });
 
 let vault = null;
@@ -38,15 +40,34 @@ async function boot() {
   try {
     const wasmUrl = new URL('pkg/freehold.js', document.baseURI);
     vault = await FreeholdVault.open({ wasmUrl, rpName: 'Freehold' });
-    state.status = (await vault.isEnrolled()) ? 'locked' : 'no-vault';
+    if (await vault.isEnrolled()) {
+      state.mode = (await vault.isConvenience()) ? 'convenience' : 'hardened';
+      state.status = 'locked';
+      // Convenience vaults auto-unlock — that's the whole point (no gesture needed on reload).
+      if (state.mode === 'convenience') await unlock();
+    } else {
+      state.status = 'no-vault';
+    }
   } catch (e) { state.status = 'error'; state.error = e.message; }
 }
 
 async function enroll() {
   state.busy = true;
-  try { await vault.enroll(); state.status = 'locked'; }
+  try { await vault.enroll(); state.mode = 'hardened'; state.status = 'locked'; }
   catch (e) { state.error = e.message; } finally { state.busy = false; }
 }
+
+async function enrollConvenience() {
+  state.busy = true;
+  try {
+    const code = await vault.enrollConvenience({ backup: true });
+    state.mode = 'convenience';
+    state.recoveryCode = code;   // show once — a device key dies with the device
+    await unlock();              // zero-friction: open immediately, no gesture
+  } catch (e) { state.error = e.message; } finally { state.busy = false; }
+}
+
+function dismissRecoveryCode() { state.recoveryCode = null; }
 
 async function unlock() {
   state.busy = true;
@@ -102,5 +123,5 @@ async function revokeApp(appId) {
 async function setField(k, v) { await broker.setField(k, v); }
 
 export function useFreehold() {
-  return { state, boot, enroll, unlock, lock, refresh, client, respondConsent, revokeApp, setField };
+  return { state, boot, enroll, enrollConvenience, dismissRecoveryCode, unlock, lock, refresh, client, respondConsent, revokeApp, setField };
 }

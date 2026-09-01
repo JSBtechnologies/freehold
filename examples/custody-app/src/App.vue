@@ -2,6 +2,7 @@
   <router-view v-if="state.status === 'unlocked'" />
   <UnlockPage v-else />
   <ConsentDialog />
+  <RecoveryCodeDialog />
 </template>
 
 <script setup>
@@ -9,6 +10,7 @@ import { onMounted } from 'vue';
 import { useFreehold } from './freehold/store.js';
 import UnlockPage from './pages/UnlockPage.vue';
 import ConsentDialog from './components/ConsentDialog.vue';
+import RecoveryCodeDialog from './components/RecoveryCodeDialog.vue';
 
 const { state, boot } = useFreehold();
 onMounted(boot);

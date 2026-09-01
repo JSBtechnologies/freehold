@@ -18,9 +18,19 @@
         </template>
 
         <template v-else-if="state.status === 'no-vault'">
-          <div class="text-body1 q-mb-md">No vault on this device yet. Create one — a passkey becomes its only key.</div>
-          <q-btn color="primary" size="lg" unelevated icon="add_moderator" label="Create vault"
-                 :loading="state.busy" @click="enroll" class="full-width" />
+          <div class="text-body1 q-mb-md">No vault on this device yet. Pick how it unlocks:</div>
+          <q-btn color="primary" size="lg" unelevated icon="fingerprint" label="Passkey — no key at rest"
+                 :loading="state.busy" @click="enroll" class="full-width q-mb-sm" />
+          <div class="text-caption text-grey-6 q-mb-md">Hardened: a biometric unlocks each time; nothing sensitive is ever stored. Best for secrets.</div>
+          <q-btn color="warning" text-color="dark" size="lg" unelevated icon="bolt" label="This device — no passkey"
+                 :loading="state.busy" @click="enrollConvenience" class="full-width q-mb-sm" outline />
+          <div class="text-caption text-grey-6">Convenience: auto-unlocks on this device, no gesture. A device-bound key is kept (non-extractable). For everyday, non-critical data.</div>
+        </template>
+
+        <template v-else-if="state.mode === 'convenience'">
+          <div class="text-body1 q-mb-md">This vault <b>auto-unlocks on this device</b> — no passkey needed.</div>
+          <q-btn color="warning" text-color="dark" size="lg" unelevated icon="bolt" label="Unlock this device"
+                 :loading="state.busy" @click="unlock" class="full-width" />
         </template>
 
         <template v-else>
@@ -38,5 +48,5 @@
 
 <script setup>
 import { useFreehold } from '../freehold/store.js';
-const { state, enroll, unlock } = useFreehold();
+const { state, enroll, enrollConvenience, unlock } = useFreehold();
 </script>
