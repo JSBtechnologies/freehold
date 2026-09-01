@@ -342,6 +342,26 @@ fn recovery_checksum(payload: &str) -> String {
     out
 }
 
+/// Derive a SAFE output filename stem from a database name that came from an attacker-controlled
+/// bundle. `recover()` returns whatever `*.db` names the bundle carried, so a crafted name like
+/// `"../../evil.db"` (or `"..\\evil.db"`) must not let a decrypt write outside the chosen out-dir.
+/// We take the final path component and keep only the pool-name charset (`[A-Za-z0-9_-]`), so no
+/// separator, `.`, or `..` can survive; an empty result falls back to `"recovered"`.
+pub fn safe_output_stem(db_name: &str) -> String {
+    let raw = db_name.strip_suffix(".db").unwrap_or(db_name);
+    // Split on BOTH separators regardless of host OS (a bundle from another platform may use either).
+    let last = raw.rsplit(['/', '\\']).next().unwrap_or(raw);
+    let stem: String = last
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    if stem.is_empty() {
+        "recovered".to_string()
+    } else {
+        stem
+    }
+}
+
 /// Advisory: does `code` parse as a generated recovery code whose checksum matches (i.e. it was very
 /// likely transcribed correctly)? False for a typo or a custom (checksum-less) code. The CLI uses this
 /// only to warn — a custom code with no checksum is still a valid key and decryption is still attempted.
@@ -428,5 +448,23 @@ mod tests {
         assert!(!verify_recovery_checksum(std::str::from_utf8(&bytes).unwrap()), "a single typo must fail");
         // A custom (checksum-less) code — like the fixture's — is not a generated code, so false.
         assert!(!verify_recovery_checksum(CODE));
+    }
+
+    #[test]
+    fn safe_output_stem_blocks_path_traversal() {
+        assert_eq!(safe_output_stem("app.db"), "app");
+        assert_eq!(safe_output_stem("notes.db"), "notes");
+        // Traversal attempts collapse to the bare final component with a safe charset.
+        assert_eq!(safe_output_stem("../../evil.db"), "evil");
+        assert_eq!(safe_output_stem("..\\..\\evil.db"), "evil");
+        assert_eq!(safe_output_stem("/etc/passwd.db"), "passwd");
+        assert_eq!(safe_output_stem("a/b/c.db"), "c");
+        // No separator, dot, or parent ref can survive.
+        for out in ["..", "../..", "/", "....//"].map(safe_output_stem) {
+            assert!(!out.contains(['/', '\\', '.']), "sanitized stem still path-ish: {out}");
+        }
+        // Degenerate names fall back rather than producing an empty/nameless path.
+        assert_eq!(safe_output_stem(".db"), "recovered");
+        assert_eq!(safe_output_stem("///.db"), "recovered");
     }
 }

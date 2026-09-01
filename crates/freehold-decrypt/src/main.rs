@@ -49,8 +49,9 @@ fn main() -> ExitCode {
     }
 
     for db in &dbs {
-        // `app.db` -> `app.sqlite`; keep it obvious these are ordinary SQLite files now.
-        let stem = db.name.strip_suffix(".db").unwrap_or(&db.name);
+        // `app.db` -> `app.sqlite`. The name is attacker-controlled (it came from the bundle), so it
+        // is sanitized to a bare filename stem — a crafted `"../../evil.db"` cannot escape out_dir.
+        let stem = freehold_decrypt::safe_output_stem(&db.name);
         let path = out_dir.join(format!("{stem}.sqlite"));
         let ok_magic = db.sqlite.len() >= freehold_decrypt::SQLITE_MAGIC.len()
             && &db.sqlite[..freehold_decrypt::SQLITE_MAGIC.len()] == freehold_decrypt::SQLITE_MAGIC;
