@@ -32,13 +32,22 @@ mod manifest;
 mod sync;
 mod vfs;
 
+// ============================ vendoring / embedding API (rlib surface) ============================
+// The wasm build's public surface is the `#[wasm_bindgen]` functions below. THIS curated re-export is
+// the Rust-library surface for a consumer embedding the encrypting VFS directly (see
+// docs/supply-chain.md, docs/audit-readiness.md). It is deliberately an explicit list — NOT `pub mod
+// vfs` — so VFS internals stay private while the management tool is genuine public API. That also
+// resolves the dead_code false-positives: methods a downstream consumer calls (pool capacity, etc.)
+// are reachable public API, not "unused".
+pub use vfs::{install, OpfsSAHError, OpfsSAHPoolCfg, OpfsSAHPoolCfgBuilder, OpfsSAHPoolUtil};
+
 use sqlite_wasm_rs as ffi;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
-use vfs::{OpfsSAHPoolCfgBuilder, OpfsSAHPoolUtil};
+// `OpfsSAHPoolCfgBuilder` and `OpfsSAHPoolUtil` come from the `pub use` above (the vendoring surface).
 use wasm_bindgen::prelude::*;
 
 // Demo DEKs. Stand-ins for the passkey-PRF-derived key (design-spec §11 / topic M2).

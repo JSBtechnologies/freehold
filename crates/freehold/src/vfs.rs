@@ -2797,11 +2797,9 @@ pub struct OpfsSAHPoolUtil {
     pool: &'static VfsAppData<SyncAccessHandleAppData>,
 }
 
-// `OpfsSAHPoolUtil` is the external pool-management tool returned by `install` (the crate's vendoring
-// API surface). Freehold drives its own pool internally, so a number of these methods have no in-crate
-// caller — dead_code is allowed at the impl level for THIS type only (not crate-wide), which is honest
-// for a management tool while still catching dead code everywhere else.
-#[allow(dead_code)]
+// `OpfsSAHPoolUtil` is the external pool-management tool returned by `install`, re-exported as the
+// crate's public vendoring API (see lib.rs) — so its methods are genuine public API, not "dead", even
+// where freehold itself has no in-crate caller.
 impl OpfsSAHPoolUtil {
     pub fn get_capacity(&self) -> u32 {
         self.pool.get_capacity()
