@@ -89,6 +89,9 @@ fn read_write_options(at: f64) -> FileSystemReadWriteOptions {
 
 struct SyncAccessFile {
     handle: FileSystemSyncAccessHandle,
+    // The physical `.opaque/` filename, read only to delete the entry in the optional
+    // `reduce_capacity`; otherwise written-but-unread, which is fine.
+    #[allow(dead_code)]
     opaque: String,
     // ENC (M3): §14.8 fault-injection gate shared with the pool (pass-through when disarmed).
     fault: Rc<FaultState>,
@@ -407,10 +410,12 @@ impl FaultState {
             }
         }
     }
+    #[cfg(feature = "testing-api")]
     fn arm(&self, n: u32) {
         self.countdown.set(Some(n));
         self.crashed.set(false);
     }
+    #[cfg(feature = "testing-api")]
     fn clear(&self) {
         self.countdown.set(None);
         self.crashed.set(false);
@@ -588,7 +593,8 @@ impl OpfsSAHPool {
         Ok(())
     }
 
-    #[allow(clippy::await_holding_refcell_ref)]
+    #[cfg(feature = "pool-management")]
+    #[allow(dead_code, clippy::await_holding_refcell_ref)]
     async fn reduce_capacity(&self, n: u32) -> Result<u32> {
         let mut available_files = self.available_files.borrow_mut();
         let available_length = available_files.len();
@@ -610,6 +616,7 @@ impl OpfsSAHPool {
         (self.map_filename_to_file.borrow().len() + self.available_files.borrow().len()) as u32
     }
 
+    #[allow(dead_code)] // paired with the pub `count()` introspection wrapper
     fn get_file_count(&self) -> u32 {
         self.map_filename_to_file.borrow().len() as u32
     }
@@ -1872,6 +1879,7 @@ impl OpfsSAHPool {
 
     // ENC: test-rig helper — overwrite a file's raw DATA region (ciphertext) byte-for-byte,
     // simulating an attacker with OPFS write access (§14 tamper/relocation/rollback tests).
+    #[cfg(feature = "testing-api")]
     fn import_raw(&self, filename: &str, bytes: &[u8]) -> Result<()> {
         let files = self.map_filename_to_file.borrow();
         let f = files
@@ -1886,6 +1894,7 @@ impl OpfsSAHPool {
         Ok(())
     }
 
+    #[cfg(feature = "testing-api")]
     fn manifest_generation(&self, db: &str) -> Option<u64> {
         self.dbs.borrow().get(db).map(|s| s.generation.get())
     }
@@ -1893,6 +1902,7 @@ impl OpfsSAHPool {
     // ENC (M3, §14.8 test-rig): overwrite `len` bytes of anchor slot `slot` with 0xFF — simulates a
     // torn/tampered anchor write. Proves the double-buffer (security-review 6): corrupting one slot
     // must not nullify rollback protection, because the other slot survives.
+    #[cfg(feature = "testing-api")]
     fn corrupt_anchor_slot(&self, slot: usize, len: usize) -> Result<()> {
         let h = self.anchor_handle.borrow();
         let h = h
@@ -1910,6 +1920,7 @@ impl OpfsSAHPool {
 
     // ENC (M3 test-rig): which anchor slot currently holds the highest authenticating seq (i.e. the
     // one an attacker would corrupt to try to roll the anchor back). Returns 0 or 1.
+    #[cfg(feature = "testing-api")]
     fn active_anchor_slot(&self) -> usize {
         let (seq, _) = self.anchor_load();
         (seq % 2) as usize
@@ -1917,6 +1928,7 @@ impl OpfsSAHPool {
 
     // ENC (H1 test-rig): snapshot the raw on-disk anchor bytes (both slots) — an attacker with OPFS
     // write access captures these to replay later. Returns the whole anchor file.
+    #[cfg(feature = "testing-api")]
     fn export_anchor_raw(&self) -> Result<Vec<u8>> {
         let h = self.anchor_handle.borrow();
         let h = h
@@ -1933,6 +1945,7 @@ impl OpfsSAHPool {
 
     // ENC (H1 test-rig): overwrite the raw on-disk anchor with captured bytes — simulates an attacker
     // restoring an OLD (or old-format) anchor blob to downgrade the freshness high-water / epoch floor.
+    #[cfg(feature = "testing-api")]
     fn import_anchor_raw(&self, bytes: &[u8]) -> Result<()> {
         let h = self.anchor_handle.borrow();
         let h = h
@@ -2244,6 +2257,7 @@ impl OpfsSAHPool {
     // with no sparse holes; shrink-only truncates — SQLite never grows via xTruncate or writes
     // past a gap) and checks every state against a shadow byte-array model: read-back content,
     // zero-fill past EOF, and exact `size()` round-trips (the classic off-by-`P` bug site, §12).
+    #[cfg(feature = "testing-api")]
     fn proptest_blockdev(&self, iters: u32) -> Result<String> {
         const NAME: &str = "__proptest__";
         let _ = self.delete_file(NAME);
@@ -2457,6 +2471,10 @@ impl VfsStore<SyncAccessFile, SyncAccessHandleAppData> for SyncAccessHandleStore
 
 struct SyncAccessHandleIoMethods;
 
+// SQLite's C VFS callbacks (xRead/xWrite/xTruncate/xSync…) have fixed C-style parameter names
+// (pFile, zBuf, iOfst, iAmt…) mandated by the FFI signature — keep them verbatim to match the
+// upstream contract rather than rename and obscure the mapping.
+#[allow(non_snake_case)]
 impl SQLiteIoMethods for SyncAccessHandleIoMethods {
     type File = SyncAccessFile;
     type AppData = SyncAccessHandleAppData;
@@ -2609,6 +2627,8 @@ impl SQLiteIoMethods for SyncAccessHandleIoMethods {
 
 struct SyncAccessHandleVfs<C>(PhantomData<C>);
 
+// C VFS callback signature (xOpen: pVfs/zName/pFile/pOutFlags) — C-style names kept per the FFI contract.
+#[allow(non_snake_case)]
 impl<C> SQLiteVfs<SyncAccessHandleIoMethods> for SyncAccessHandleVfs<C>
 where
     C: OsCallback,
@@ -2745,8 +2765,9 @@ pub enum OpfsSAHError {
     CreateSyncAccessHandle(JsValue),
     #[error("An error occurred while iterating")]
     IterHandle(JsValue),
-    #[error("An error occurred while getting filename")]
-    GetPath(JsValue),
+    // Constructed only by `reduce_capacity` (the optional pool-management feature).
+    #[cfg(feature = "pool-management")]
+    #[allow(dead_code)]
     #[error("An error occurred while removing entity")]
     RemoveEntity(JsValue),
     #[error("An error occurred while getting size")]
@@ -2776,6 +2797,11 @@ pub struct OpfsSAHPoolUtil {
     pool: &'static VfsAppData<SyncAccessHandleAppData>,
 }
 
+// `OpfsSAHPoolUtil` is the external pool-management tool returned by `install` (the crate's vendoring
+// API surface). Freehold drives its own pool internally, so a number of these methods have no in-crate
+// caller — dead_code is allowed at the impl level for THIS type only (not crate-wide), which is honest
+// for a management tool while still catching dead code everywhere else.
+#[allow(dead_code)]
 impl OpfsSAHPoolUtil {
     pub fn get_capacity(&self) -> u32 {
         self.pool.get_capacity()
@@ -2785,10 +2811,14 @@ impl OpfsSAHPoolUtil {
         self.pool.add_capacity(n).await
     }
 
+    /// Upstream sahpool storage-reclaim knob (optional vendoring surface, not used by freehold).
+    #[cfg(feature = "pool-management")]
+    #[allow(dead_code)] // external API: no in-crate caller by design
     pub async fn reduce_capacity(&self, n: u32) -> Result<u32> {
         self.pool.reduce_capacity(n).await
     }
 
+    #[allow(dead_code)]
     pub async fn reserve_minimum_capacity(&self, min: u32) -> Result<()> {
         self.pool.reserve_minimum_capacity(min).await
     }
@@ -2847,7 +2877,9 @@ impl OpfsSAHPoolUtil {
     }
 
     /// ENC (H1 test-rig): snapshot / restore the raw on-disk anchor bytes (attacker replay).
+    /// `export_` is the symmetric partner of the used `import_anchor_raw`; kept for the test rig.
     #[cfg(feature = "testing-api")]
+    #[allow(dead_code)]
     pub fn export_anchor_raw(&self) -> Result<Vec<u8>> {
         self.pool.export_anchor_raw()
     }
@@ -2955,6 +2987,8 @@ impl OpfsSAHPoolUtil {
         self.pool.get_filenames()
     }
 
+    /// Upstream sahpool usage-introspection knob (harmless external API; no in-crate caller).
+    #[allow(dead_code)]
     pub fn count(&self) -> u32 {
         self.pool.get_file_count()
     }

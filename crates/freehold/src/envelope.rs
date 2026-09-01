@@ -75,6 +75,7 @@ pub enum EnvelopeError {
     /// A slot opened but the envelope-wide MAC failed — header/generation/slots were tampered.
     Tamper,
     /// The envelope's generation is below the caller's freshness floor — a rolled-back envelope.
+    #[allow(dead_code)] // constructed by `check_fresh` (public API; in-crate caller is the harness)
     Rollback,
     /// Internal AEAD seal failure (should not happen for well-formed input).
     Seal,
@@ -189,6 +190,9 @@ pub fn envelope_generation(blob: &[u8]) -> u64 {
 /// genuine older envelope replayed to re-plant a revoked slot is caught here. Locally the floor is
 /// itself a backstop (an attacker who rewrites all storage rewrites it too); cross-device the
 /// generation is bound into the sync epoch so a stale envelope cannot propagate.
+// Public anti-rollback API. The in-crate caller is the `run_tests` harness; production enforces the
+// floor in the SDK (JS #envelope), so the hardened build has no in-crate caller — hence `allow`.
+#[allow(dead_code)]
 pub fn check_fresh(blob: &[u8], floor: u64) -> Result<(), EnvelopeError> {
     parse(blob)?;
     if read_generation(blob) < floor {

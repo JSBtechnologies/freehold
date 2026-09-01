@@ -287,11 +287,13 @@ fn incoming_wins(local_vv: &VersionVector, incoming_vv: &VersionVector) -> bool 
 /// stores/serves `Vec<u8>` — it has no way to inspect blob contents, enforcing the "content-opaque"
 /// contract by construction. `list(sync_id, since)` returns the current count (new blobs are
 /// everything at index ≥ `since`); `get(sync_id, seq)` fetches one by its arrival index.
+#[cfg(feature = "testing-api")]
 #[derive(Default)]
 pub struct InMemoryRelay {
     logs: std::collections::HashMap<[u8; 16], Vec<Vec<u8>>>,
 }
 
+#[cfg(feature = "testing-api")]
 impl InMemoryRelay {
     pub fn new() -> Self {
         InMemoryRelay { logs: std::collections::HashMap::new() }
@@ -339,6 +341,7 @@ fn take_u32(b: &[u8], at: &mut usize) -> Result<usize, String> {
 // Callable from run_tests() (SY section) — asserts VersionVector.relation over the four cases and
 // reconcile determinism (arg-order independence of the actual winner). Returns Err on any miss.
 
+#[cfg(feature = "testing-api")]
 pub fn self_check() -> Result<(), String> {
     let a = [0xa1u8; 16];
     let b = [0xb2u8; 16];

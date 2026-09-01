@@ -19,6 +19,12 @@
 //!   S   session model: session_open → parameterized SQL on named DBs → lock → reopen (mock PRF)
 //! See BUILD-NOTES for the honest IN/DEFERRED ledger.
 
+// Dead-code hygiene (audit follow-up): rather than a crate-wide `#![allow(dead_code)]` (which would
+// also hide genuinely-dead code forever), unused items are handled precisely: test-only helpers are
+// `#[cfg(feature = "testing-api")]`-gated (absent from the hardened build), the optional pool-capacity
+// management API is behind an off-by-default `pool-management` feature (a vendoring consumer opts in;
+// it is NOT in freehold's own shipped surface), and `check_fresh`/`Rollback` stay as real public API.
+
 mod bundle;
 mod crypto;
 mod envelope;
