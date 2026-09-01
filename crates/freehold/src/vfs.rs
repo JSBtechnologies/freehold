@@ -142,12 +142,15 @@ impl SyncAccessFile {
 
     /// Physical size of the data region (bytes of ciphertext blocks), excluding the sahpool header.
     fn phys_size(&self) -> VfsResult<usize> {
-        Ok(self
+        let sz = self
             .handle
             .get_size()
             .map_err(OpfsSAHError::GetSize)
-            .map_err(|err| err.vfs_err(SQLITE_IOERR))? as usize
-            - HEADER_OFFSET_DATA)
+            .map_err(|err| err.vfs_err(SQLITE_IOERR))? as usize;
+        // A file smaller than the sahpool header is torn/corrupt — floor at 0 rather than let the
+        // unsigned subtraction wrap to a ~4 GB phys size, which would route reads into the zero-fill/
+        // short-read path instead of failing closed (§17.K). (audit #1)
+        Ok(sz.saturating_sub(HEADER_OFFSET_DATA))
     }
 
     /// Truncate the physical data region to `size` bytes.
@@ -291,13 +294,22 @@ impl VfsFile for SyncAccessFile {
                 plain.copy_from_slice(&buf[(ov_lo - start)..(ov_hi - start)]);
             } else {
                 // read-modify-write
-                if phys_at + p <= phys && self.phys_read(&mut physbuf, phys_at)? >= p {
+                if phys_at + p <= phys {
+                    // In-range block: it MUST read fully. A short read here is a torn write, not
+                    // growth — fail closed rather than silently zero-fill over real (partial) data. (audit #7)
+                    if self.phys_read(&mut physbuf, phys_at)? < p {
+                        return Err(VfsError::new(
+                            SQLITE_IOERR,
+                            "short read of an in-range block (torn write) on read-modify-write".into(),
+                        ));
+                    }
                     crypto
                         .open_into(&file_id, &domain, k as u64, &physbuf, &mut plain)
                         .map_err(|_| {
                             VfsError::new(SQLITE_IOERR, "AEAD auth failed on read-modify-write".into())
                         })?;
                 } else {
+                    // Block past the physical end: a genuinely new block being grown into — zero-fill.
                     plain.fill(0);
                 }
                 plain[(ov_lo - blk_start)..(ov_hi - blk_start)]
@@ -628,9 +640,13 @@ impl OpfsSAHPool {
                 .map_err(OpfsSAHError::Truncate)?;
             return Ok(None);
         }
-        let filename =
-            String::from_utf8(self.header_buffer.subarray(0, name_length as u32).to_vec()).unwrap();
-        Ok(Some(filename))
+        // A corrupt/tampered filename header must not panic the whole wasm instance (wasm has no
+        // unwinding — a panic kills the vault). Treat a non-UTF-8 name as "no associated file"; the
+        // slot is then reclaimable rather than fatal. (audit #3)
+        match String::from_utf8(self.header_buffer.subarray(0, name_length as u32).to_vec()) {
+            Ok(filename) => Ok(Some(filename)),
+            Err(_) => Ok(None),
+        }
     }
 
     fn set_associated_filename(
@@ -1198,7 +1214,9 @@ impl OpfsSAHPool {
             }
             let st = self.create_manifest(name, &mname)?;
             let files = self.map_filename_to_file.borrow();
-            let f = files.get(name).unwrap();
+            let f = files
+                .get(name)
+                .ok_or_else(|| OpfsSAHError::Generic(format!("{name} vanished from pool during open")))?;
             f.crypto.replace(st.crypto.clone());
             f.key_domain.set(st.uuid); // security-review 3d: bind block AAD to this DB's identity
             f.is_main_db.set(true);
@@ -1227,7 +1245,9 @@ impl OpfsSAHPool {
                 self.delete_file(&mname)?;
                 let st = self.create_manifest(name, &mname)?;
                 let files = self.map_filename_to_file.borrow();
-                let f = files.get(name).unwrap();
+                let f = files
+                .get(name)
+                .ok_or_else(|| OpfsSAHError::Generic(format!("{name} vanished from pool during open")))?;
                 f.crypto.replace(st.crypto.clone());
                 f.key_domain.set(st.uuid);
                 f.is_main_db.set(true);
@@ -1259,7 +1279,9 @@ impl OpfsSAHPool {
         self.anchor_record(&uuid, Some(gen), Some(gen))?;
 
         let files = self.map_filename_to_file.borrow();
-        let main = files.get(name).unwrap();
+        let main = files
+            .get(name)
+            .ok_or_else(|| OpfsSAHError::Generic(format!("{name} vanished from pool during open")))?;
         main.crypto.replace(kdb.clone());
         main.key_domain.set(uuid); // security-review 3d: bind blocks to this DB's identity
         main.is_main_db.set(true);
@@ -2316,6 +2338,14 @@ fn manifest_name(db: &str) -> String {
     format!("{db}#manifest")
 }
 
+// Defense-in-depth (audit #5): the VFS runs on wasm32 where `usize == u32`, so a negative or
+// >u32::MAX offset/size from the C boundary would wrap on `as usize`/`as f64`. SQLite's own
+// arithmetic normally keeps these in range; this is the belt-and-suspenders bound before we cast.
+#[inline]
+fn ffi_offset_ok(v: rsqlite_vfs::ffi::sqlite3_int64) -> bool {
+    v >= 0 && v <= u32::MAX as rsqlite_vfs::ffi::sqlite3_int64
+}
+
 // issue #4 / D-RK4 (DEK rotation): staging file names. Neither can collide with a legitimate pool
 // file — `valid_pool_filename` requires a `.db`/`.db#manifest` tail, and `valid_db_name` (session
 // layer) forbids `~`/`#`/`_`-prefixed names — so SQLite never opens them and `session_export`'s
@@ -2466,6 +2496,11 @@ impl SQLiteIoMethods for SyncAccessHandleIoMethods {
         const JOURNAL_MAGIC: [u8; 8] = [0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7];
         let vfs_file = SQLiteVfsFile::from_file(pFile);
         let app_data = SyncAccessHandleStore::app_data(vfs_file.vfs);
+        // Defense-in-depth (audit #5): SQLite keeps these in range, but a negative/oversized value
+        // would wrap on wasm32 (usize == u32). Reject before casting.
+        if !ffi_offset_ok(iOfst) || iAmt < 0 {
+            return SQLITE_IOERR;
+        }
         let offset = iOfst as usize;
         let size = iAmt as usize;
         let slice = core::slice::from_raw_parts(zBuf.cast::<u8>(), size);
@@ -2519,6 +2554,11 @@ impl SQLiteIoMethods for SyncAccessHandleIoMethods {
     ) -> ::std::os::raw::c_int {
         let vfs_file = SQLiteVfsFile::from_file(pFile);
         let app_data = SyncAccessHandleStore::app_data(vfs_file.vfs);
+        // Defense-in-depth (audit #5): a negative/oversized size would wrap the `size as usize` and the
+        // `(HEADER_OFFSET_DATA + size) as f64` truncate below. Reject before use.
+        if !ffi_offset_ok(size) {
+            return SQLITE_IOERR;
+        }
         // Seal FIRST (only for a journal truncate-to-0 = commit finalization). #3: the shared barrier
         // no-ops if the journal is already dead (not hot), so truncating an already-header-zeroed
         // journal never double-fires the generation bump.

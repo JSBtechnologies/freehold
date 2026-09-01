@@ -2474,6 +2474,12 @@ unsafe fn query_json_params(
                 ffi::sqlite3_bind_double(stmt, idx, f)
             }
         } else if let Some(s) = v.as_string() {
+            // audit #8: a >2 GiB string would truncate/sign-flip through `as i32` and mis-bind (a
+            // negative length tells SQLite "read to NUL"). Reject rather than bind a wrong length.
+            if s.len() > i32::MAX as usize {
+                ffi::sqlite3_finalize(stmt);
+                return Err(format!("param {i} text is too large to bind ({} bytes)", s.len()));
+            }
             let n = s.len() as i32;
             let cs = match CString::new(s) {
                 Ok(cs) => cs,

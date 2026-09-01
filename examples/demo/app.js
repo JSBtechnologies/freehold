@@ -88,7 +88,7 @@ async function refreshNotes() {
     await vault.sql('CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY, body TEXT, at TEXT)');
     const rows = await vault.sql('SELECT id, body, at FROM notes ORDER BY id DESC LIMIT 50');
     $('notes').innerHTML = rows.length
-      ? rows.map((r) => `<tr><td>${r[0]}</td><td>${escapeHtml(r[1])}</td><td class="muted">${r[2] ?? ''}</td></tr>`).join('')
+      ? rows.map((r) => `<tr><td>${escapeHtml(r[0])}</td><td>${escapeHtml(r[1])}</td><td class="muted">${escapeHtml(r[2] ?? '')}</td></tr>`).join('')
       : '<tr><td colspan="3" class="muted">no notes yet</td></tr>';
   } catch (e) { log('notes: ' + e.message, 'bad'); }
 }
