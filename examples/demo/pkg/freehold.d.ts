@@ -18,6 +18,12 @@ export function add_recovery(existing_prf: Uint8Array, code: string, blob: Uint8
 export function enroll(prf: Uint8Array): Promise<Uint8Array>;
 
 /**
+ * Enroll a **device-key** vault (convenience tier, D-CV6): wrap a fresh DEK under `HKDF(secret,…)` in a
+ * slot marked `device`. Returns the envelope blob for the caller to persist. The DEK never leaves wasm.
+ */
+export function enroll_device(secret: Uint8Array): Promise<Uint8Array>;
+
+/**
  * The envelope's anti-rollback generation counter (v3). The SDK persists the max it has seen as a
  * floor and refuses any envelope below it — catching a rolled-back envelope that would re-plant a
  * revoked slot. Returned as f64 (generations are small; exact through 2^53).
@@ -38,7 +44,7 @@ export function gen_recovery(): string;
 export function import_bundle(bytes: Uint8Array): Promise<any>;
 
 /**
- * List the envelope's unlock methods as `kek_id:kind` pairs, comma-separated (kind: passkey|recovery).
+ * List the envelope's unlock methods as `kek_id:kind` pairs, comma-separated (kind: passkey|recovery|device).
  */
 export function list_methods(blob: Uint8Array): string;
 
@@ -151,6 +157,7 @@ export interface InitOutput {
     readonly add_passkey: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly add_recovery: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly enroll: (a: number, b: number) => any;
+    readonly enroll_device: (a: number, b: number) => any;
     readonly envelope_generation: (a: number, b: number) => number;
     readonly gen_recovery: () => [number, number, number, number];
     readonly import_bundle: (a: number, b: number) => any;

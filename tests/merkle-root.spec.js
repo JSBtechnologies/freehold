@@ -31,6 +31,7 @@ test('run_tests(): full suite green incl. MK (full-state Merkle root) section', 
 
   // Envelope anti-rollback + DEK-rotation (issue #3/#4) sections must be present and green.
   expect(out).toContain('M3b. envelope v3 anti-rollback');
+  expect(out).toContain('M3e. convenience device slot'); // D-CV5/6/7: device slot label + export strip
   expect(out).toContain('M3d. recovery-code checksum');
   expect(out).toContain('M3c. DEK rotation (envelope half)');
   expect(out).toContain('RK. DEK rotation (physical re-encryption)');

@@ -340,7 +340,7 @@ export class FreeholdVault {
     const iv = rand(12);
     let S = rand(32);
     const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, deviceKey, S));
-    let envelope = await this.#call('enroll', [S], [S.buffer]); // S treated as a PRF output, then detached
+    let envelope = await this.#call('enroll_device', [S], [S.buffer]); // S treated as a PRF output → device-kind slot (D-CV6), then detached
     S = null;
     await idbSet('deviceKey', deviceKey);       // CryptoKey stored by reference (non-extractable)
     await idbSet('deviceWrap', { iv, ct });
@@ -513,7 +513,7 @@ export class FreeholdVault {
     return recovery_code;
   }
 
-  /** List unlock methods as [{ kekId, kind }] (kind: 'passkey' | 'recovery'). */
+  /** List unlock methods as [{ kekId, kind }] (kind: 'passkey' | 'recovery' | 'device'). */
   async listMethods() {
     const s = await this.#call('list_methods', [await this.#envelope()]);
     return s.split(',').filter(Boolean).map((m) => {

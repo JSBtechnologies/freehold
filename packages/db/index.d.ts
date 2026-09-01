@@ -13,7 +13,7 @@ export interface OpenOptions {
 
 export interface UnlockMethod {
   kekId: number;
-  kind: 'passkey' | 'recovery';
+  kind: 'passkey' | 'recovery' | 'device';
 }
 
 /** Metadata carried by a `.freehold` bundle (fields are empty Uint8Arrays when absent). */

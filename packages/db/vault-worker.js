@@ -7,7 +7,7 @@ let wasm = null;
 
 // Ops the main thread may invoke — a fixed allowlist, NOT arbitrary property lookup on the module.
 const OPS = new Set([
-  'enroll', 'gen_recovery', 'recovery_code_valid', 'add_recovery', 'add_passkey', 'remove_method',
+  'enroll', 'enroll_device', 'gen_recovery', 'recovery_code_valid', 'add_recovery', 'add_passkey', 'remove_method',
   'list_methods', 'envelope_generation', 'import_bundle', 'rotate_dek',
   'session_open', 'session_open_recovery', 'session_lock', 'session_active',
   'session_sql', 'session_export',

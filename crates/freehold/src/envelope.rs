@@ -63,6 +63,10 @@ const WRAP_AAD_PREFIX: &[u8] = b"freehold-envelope-v3";
 
 pub const KIND_PASSKEY: u8 = 0;
 pub const KIND_RECOVERY: u8 = 1;
+/// A convenience device slot (D-CV6). Cryptographically identical to a passkey slot — `KEK =
+/// HKDF(secret,"freehold-kek-v1")` — but the `kind` byte (authenticated in the AAD) marks it as a
+/// device-bound key so `list_methods` can be honest and `strip_kind` can drop it from an export.
+pub const KIND_DEVICE: u8 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvelopeError {
@@ -333,29 +337,75 @@ pub fn generate_recovery_code() -> Result<String, EnvelopeError> {
     Ok(grouped)
 }
 
-/// Create a new envelope (generation 1) with a single passkey slot (kek_id 0). Random per-envelope salt.
-pub fn create_envelope(dek: &[u8; DEK_LEN], prf_output: &[u8]) -> Result<Vec<u8>, EnvelopeError> {
+/// Create a new envelope (generation 1) with a single slot (kek_id 0) of `kind`, keyed by `secret`.
+/// Random per-envelope salt. Shared by `create_envelope` (passkey) and `create_device_envelope`.
+fn create_envelope_kind(dek: &[u8; DEK_LEN], secret: &[u8], kind: u8) -> Result<Vec<u8>, EnvelopeError> {
     let mut header = vec![0u8; HEADER_LEN];
     header[..8].copy_from_slice(MAGIC);
     header[8] = VERSION;
     header[9] = 1; // slot_count
     getrandom::getrandom(&mut header[SALT_OFF..SALT_OFF + SALT_LEN]).map_err(|_| EnvelopeError::Rng)?;
     header[GEN_OFF..GEN_OFF + GEN_LEN].copy_from_slice(&1u64.to_le_bytes());
-    let slot = wrap_slot(dek, &kek_from_prf(prf_output), 0, KIND_PASSKEY)?;
+    let slot = wrap_slot(dek, &kek_from_prf(secret), 0, kind)?;
     header.extend_from_slice(&slot);
     Ok(finalize(header, dek))
 }
 
-/// Rebuild an envelope body from `blob`'s existing slots plus `add`, with the generation bumped and
-/// `slot_count` set to `count`, then re-MAC under `dek`. Shared by the add/remove paths.
-fn rebuild(blob: &[u8], dek: &[u8; DEK_LEN], keep: &[u8], count: usize) -> Vec<u8> {
+/// Create a new envelope (generation 1) with a single passkey slot (kek_id 0). Random per-envelope salt.
+pub fn create_envelope(dek: &[u8; DEK_LEN], prf_output: &[u8]) -> Result<Vec<u8>, EnvelopeError> {
+    create_envelope_kind(dek, prf_output, KIND_PASSKEY)
+}
+
+/// Create a new envelope whose sole slot is a **device** slot (D-CV6). Identical wrapping to a passkey
+/// slot (`KEK = HKDF(secret,…)`) but marked `KIND_DEVICE`, so it lists honestly and is stripped on
+/// export. `secret` is the locally-generated 32-byte device secret `S` (treated exactly as a PRF output).
+pub fn create_device_envelope(dek: &[u8; DEK_LEN], secret: &[u8]) -> Result<Vec<u8>, EnvelopeError> {
+    create_envelope_kind(dek, secret, KIND_DEVICE)
+}
+
+/// Rebuild an envelope body from `blob`'s header + the given `keep` slots, setting `slot_count` to
+/// `count` and the generation to `gen`, then re-MAC under `dek`. The generation is a parameter so
+/// mutating ops can bump it (`rebuild`) while export-stripping preserves it (`strip_kind`, D-CV7).
+fn rebuild_gen(blob: &[u8], dek: &[u8; DEK_LEN], keep: &[u8], count: usize, gen: u64) -> Vec<u8> {
     let mut body = Vec::with_capacity(HEADER_LEN + keep.len());
     body.extend_from_slice(&blob[..HEADER_LEN]);
     body[9] = count as u8;
-    let next_gen = read_generation(blob).wrapping_add(1);
-    body[GEN_OFF..GEN_OFF + GEN_LEN].copy_from_slice(&next_gen.to_le_bytes());
+    body[GEN_OFF..GEN_OFF + GEN_LEN].copy_from_slice(&gen.to_le_bytes());
     body.extend_from_slice(keep);
     finalize(body, dek)
+}
+
+/// Rebuild with the generation **bumped** — the add/remove path (a mutation the freshness floor must
+/// see advance).
+fn rebuild(blob: &[u8], dek: &[u8; DEK_LEN], keep: &[u8], count: usize) -> Vec<u8> {
+    rebuild_gen(blob, dek, keep, count, read_generation(blob).wrapping_add(1))
+}
+
+/// Remove every slot whose `kind` matches, re-MAC under `dek`, and **preserve** the generation
+/// (D-CV7 — docs/convenience-tier-design.md §8.4). Used to strip a device-bound slot before export: a
+/// device key is meaningless off-device, so it never travels in a portable bundle. This is not a
+/// revocation (no authorization state changes for other devices), so the generation does not advance;
+/// re-MAC is still required because the body changed. Errors (`Format`) if it would leave **zero**
+/// slots — a vault with only slots of this kind (e.g. a device-only convenience vault) cannot be
+/// exported. Needs the `dek` (re-MAC), exactly like every other envelope mutation.
+pub fn strip_kind(blob: &[u8], dek: &[u8; DEK_LEN], kind: u8) -> Result<Vec<u8>, EnvelopeError> {
+    let n = parse(blob)?;
+    let mut keep = Vec::with_capacity(n * SLOT_LEN);
+    let mut kept = 0usize;
+    for i in 0..n {
+        let at = HEADER_LEN + i * SLOT_LEN;
+        if blob[at + 1] != kind {
+            keep.extend_from_slice(&blob[at..at + SLOT_LEN]);
+            kept += 1;
+        }
+    }
+    if kept == 0 {
+        return Err(EnvelopeError::Format); // would orphan the DEK — nothing to export under
+    }
+    if kept == n {
+        return Ok(blob.to_vec()); // no slot of this kind — return the (already valid) blob unchanged
+    }
+    Ok(rebuild_gen(blob, dek, &keep, kept, read_generation(blob)))
 }
 
 /// Append a passkey slot wrapping the SAME `dek` under the KEK derived from `prf_output`. Bumps the

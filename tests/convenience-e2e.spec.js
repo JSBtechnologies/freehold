@@ -24,6 +24,12 @@ test('convenience tier: device-key auto-unlock, no gesture, key never at rest in
   expect(await page.evaluate(() => window.fh.isConvenience())).toBe(true);
   expect(await page.evaluate(() => window.fh.needsBackup()), 'backup satisfied by the recovery code').toBe(false);
 
+  // D-CV6: the device slot is labeled honestly (not masquerading as a passkey), alongside recovery.
+  const methods = await page.evaluate(() => window.fh.listMethods());
+  expect(methods.some((m) => m.kind === 'device'), 'device slot lists as `device`').toBe(true);
+  expect(methods.some((m) => m.kind === 'recovery'), 'recovery slot present for durability').toBe(true);
+  expect(methods.some((m) => m.kind === 'passkey'), 'no passkey slot on a device-only enroll').toBe(false);
+
   // The wrapped secret is stored, but the RAW secret is NOT recoverable from storage: the wrapping
   // CryptoKey is non-extractable, so exporting it throws.
   const keyGuard = await page.evaluate(async () => {
@@ -59,6 +65,32 @@ test('convenience tier: device-key auto-unlock, no gesture, key never at rest in
   await page.evaluate((c) => window.fh.unlockWithRecovery(c), code);
   expect(await page.evaluate(() => window.fh.isUnlocked())).toBe(true);
   expect(await page.evaluate(() => window.fh.sql('SELECT v FROM t', [], 'app'))).toEqual([['conv']]);
+
+  // D-CV5: export a bundle (while unlocked) and prove the device slot is STRIPPED — import it into a
+  // FRESH context (no device key in its storage) and confirm it carries no device slot, does not report
+  // as convenience, yet still opens via the recovery code with the data intact.
+  const bundleB64 = await page.evaluate(() => window.fh.exportBundleB64());
+  const ctx2 = await browser.newContext();
+  const page2 = await ctx2.newPage();
+  const errors2 = [];
+  page2.on('pageerror', (e) => errors2.push(e.message));
+  await page2.goto('/convenience-test.html');
+  await page2.waitForFunction(() => window.fhReady === true, null, { timeout: 30_000 });
+  await page2.evaluate(() => window.fh.open());
+  await page2.evaluate((b) => window.fh.importBundleB64(b), bundleB64);
+
+  const m2 = await page2.evaluate(() => window.fh.listMethods());
+  expect(m2.some((x) => x.kind === 'device'), 'device slot is stripped from the export (D-CV5)').toBe(false);
+  expect(m2.some((x) => x.kind === 'recovery'), 'recovery slot survives export').toBe(true);
+  expect(await page2.evaluate(() => window.fh.isConvenience()), 'importing device has no device key').toBe(false);
+
+  await page2.evaluate((c) => window.fh.unlockWithRecovery(c), code);
+  expect(await page2.evaluate(() => window.fh.isUnlocked())).toBe(true);
+  expect(await page2.evaluate(() => window.fh.sql('SELECT v FROM t', [], 'app')),
+    'imported (device-stripped) vault opens via recovery, data intact').toEqual([['conv']]);
+  await page2.evaluate(() => window.fh.reset());
+  expect(errors2, 'no page errors in the importing context').toEqual([]);
+  await ctx2.close();
 
   await page.evaluate(() => window.fh.reset());
   expect(errors, 'no uncaught page errors').toEqual([]);

@@ -1994,6 +1994,15 @@ impl OpfsSAHPool {
             .map_err(|e| OpfsSAHError::Generic(format!("epoch seal: {e:?}")))
     }
 
+    // ENC (D-CV5): return `blob` with every device-kind slot removed, re-MAC'd under THIS pool's DEK,
+    // generation preserved (D-CV7). For export only: a device-bound convenience slot is meaningless
+    // off-device, so it never travels in a portable bundle. The DEK stays inside the pool (mirrors
+    // `export_epoch`). Errors if the vault has ONLY device slots (nothing left to open the export).
+    fn strip_export_envelope(&self, blob: &[u8]) -> Result<Vec<u8>> {
+        crate::envelope::strip_kind(blob, &self.dek, crate::envelope::KIND_DEVICE)
+            .map_err(|e| OpfsSAHError::Generic(format!("strip device slot: {e:?}")))
+    }
+
     // ============ ENC (freehold-sync-design §4/§5): sync-layer key material ============
     // Both derive purely from the DEK (no manifest / generation), exactly like `epoch_key` above: the
     // DEK stays inside the pool. Only the opaque 16-byte `sync_id` (a capability, not the key) and
@@ -3041,6 +3050,13 @@ impl OpfsSAHPoolUtil {
     /// the caller attests alongside the DB generation. Requires the pool installed with the REAL DEK.
     pub fn export_epoch(&self, db_name: &str, env_generation: u64) -> Result<Vec<u8>> {
         self.pool.export_epoch(db_name, env_generation)
+    }
+
+    /// ENC (D-CV5): strip device-kind slots from `envelope` for export — re-MAC under the pool DEK,
+    /// generation preserved (D-CV7). A device slot is device-bound, so it never travels in a bundle.
+    /// Errors if the vault has only device slots. Requires the REAL DEK.
+    pub fn strip_export_envelope(&self, envelope: &[u8]) -> Result<Vec<u8>> {
+        self.pool.strip_export_envelope(envelope)
     }
 
     /// ENC (sync-epoch): apply a peer's epoch token — verify + raise the local DB freshness

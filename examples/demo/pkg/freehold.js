@@ -60,6 +60,19 @@ export function enroll(prf) {
 }
 
 /**
+ * Enroll a **device-key** vault (convenience tier, D-CV6): wrap a fresh DEK under `HKDF(secret,…)` in a
+ * slot marked `device`. Returns the envelope blob for the caller to persist. The DEK never leaves wasm.
+ * @param {Uint8Array} secret
+ * @returns {Promise<Uint8Array>}
+ */
+export function enroll_device(secret) {
+    const ptr0 = passArray8ToWasm0(secret, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.enroll_device(ptr0, len0);
+    return ret;
+}
+
+/**
  * The envelope's anti-rollback generation counter (v3). The SDK persists the max it has seen as a
  * floor and refuses any envelope below it — catching a rolled-back envelope that would re-plant a
  * revoked slot. Returned as f64 (generations are small; exact through 2^53).
@@ -112,7 +125,7 @@ export function import_bundle(bytes) {
 }
 
 /**
- * List the envelope's unlock methods as `kek_id:kind` pairs, comma-separated (kind: passkey|recovery).
+ * List the envelope's unlock methods as `kek_id:kind` pairs, comma-separated (kind: passkey|recovery|device).
  * @param {Uint8Array} blob
  * @returns {string}
  */
@@ -867,7 +880,7 @@ function __wbg_get_imports() {
             return ret;
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 698, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 703, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__ha22148a4a7c1d5ff);
             return ret;
         },

@@ -1100,6 +1100,52 @@ async fn run() -> std::result::Result<String, String> {
             "M3b. envelope v3 anti-rollback: gen {gen_before}→{gen_after} monotonic | stale copy REFUSED by floor | forged-gen copy fails MAC (Tamper), no leak\n"
         ));
 
+        // ---- M3e (convenience device slot + export strip, D-CV5/D-CV6/D-CV7) -------------------------
+        // A device slot is a passkey-style slot marked KIND_DEVICE: it opens with open_with_prf(S), lists
+        // as `device`, and strip_kind(DEVICE) drops it for export WITHOUT bumping the generation (D-CV7),
+        // leaving the recovery slot working. A device-only vault refuses to strip (nothing left to open).
+        {
+            let dev_secret: [u8; 32] = [0x5au8; 32];
+            let mut denv = envelope::create_device_envelope(&DEK_OK, &dev_secret)
+                .map_err(|e| format!("M3e create_device: {e:?}"))?;
+            let via_dev = envelope::open_with_prf(&denv, &dev_secret).map_err(|e| format!("M3e open device: {e:?}"))?;
+            if via_dev.as_slice() != DEK_OK {
+                return Err("M3e: device slot recovered the WRONG DEK".into());
+            }
+            let infos = envelope::slot_infos(&denv);
+            if infos.len() != 1 || infos[0].kind != envelope::KIND_DEVICE {
+                return Err("M3e: sole slot is not KIND_DEVICE".into());
+            }
+            // A device-only vault cannot be stripped for export (would orphan the DEK).
+            match envelope::strip_kind(&denv, &DEK_OK, envelope::KIND_DEVICE) {
+                Err(envelope::EnvelopeError::Format) => {}
+                other => return Err(format!("M3e: device-only strip should error (Format), got {other:?}")),
+            }
+            // Add a recovery slot, then strip the device slot: recovery survives, device is gone, gen kept.
+            let dcode = envelope::generate_recovery_code().map_err(|e| format!("M3e gen code: {e:?}"))?;
+            denv = envelope::add_recovery_slot(&denv, &DEK_OK, &dcode).map_err(|e| format!("M3e add recovery: {e:?}"))?;
+            let gen_pre = envelope::envelope_generation(&denv);
+            let stripped = envelope::strip_kind(&denv, &DEK_OK, envelope::KIND_DEVICE)
+                .map_err(|e| format!("M3e strip device: {e:?}"))?;
+            if envelope::envelope_generation(&stripped) != gen_pre {
+                return Err("M3e: strip must PRESERVE the generation (D-CV7)".into());
+            }
+            if envelope::open_with_prf(&stripped, &dev_secret).is_ok() {
+                return Err("M3e: STRIPPED envelope still opens under the device secret!".into());
+            }
+            let via_rec = envelope::open_with_recovery(&stripped, &dcode)
+                .map_err(|e| format!("M3e: recovery broke after strip: {e:?}"))?;
+            if via_rec.as_slice() != DEK_OK {
+                return Err("M3e: recovery recovered the WRONG DEK after strip".into());
+            }
+            if envelope::slot_infos(&stripped).iter().any(|i| i.kind == envelope::KIND_DEVICE) {
+                return Err("M3e: device slot survived the strip".into());
+            }
+            r.push_str(&format!(
+                "M3e. convenience device slot: opens under S, lists `device` | device-only strip refused | strip drops device slot, keeps recovery, gen {gen_pre} preserved (D-CV5/6/7)\n"
+            ));
+        }
+
         // ---- M3d (recovery-code checksum, issue #1): a generated code self-verifies; a single-symbol
         // typo is caught; a custom (checksum-less) code reads as unverified. Advisory only — never gates
         // unlock — but it must round-trip and reject typos (the standalone decryptor mirrors this).
@@ -2354,6 +2400,33 @@ pub async fn enroll(prf: &[u8]) -> Result<Vec<u8>, JsValue> {
     enroll_inner(prf).await.map_err(|e| JsValue::from_str(&e))
 }
 
+// D-CV6 (convenience tier): enroll a fresh vault whose sole slot is a DEVICE slot keyed by the
+// locally-generated 32-byte secret `S`. Identical to `enroll_inner` except the slot is marked
+// `KIND_DEVICE`, so `list_methods` reports it honestly and `session_export` strips it (D-CV5). `S` is
+// treated exactly as a PRF output; the SDK later adds a recovery slot (D-CV4) via `add_recovery`.
+async fn enroll_device_inner(secret: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    if secret.len() < 16 {
+        return Err("device secret too short — expected a 32-byte random secret".into());
+    }
+    let dek = envelope::random_dek().map_err(|e| format!("random_dek: {e:?}"))?;
+    let blob = envelope::create_device_envelope(&dek, secret)
+        .map_err(|e| format!("create_device_envelope: {e:?}"))?;
+    // Initialize an EMPTY vault pool, exactly like `enroll_inner` (clear_on_init wipes prior ciphertext).
+    let util = vfs::install::<ffi::WasmOsCallback>(&demo_cfg("pk-enroll", true), true, &dek)
+        .await
+        .map_err(|e| format!("install: {e:?}"))?;
+    util.pause_vfs().map_err(|e| format!("pause: {e:?}"))?;
+    Ok(blob)
+}
+
+/// Enroll a **device-key** vault (convenience tier, D-CV6): wrap a fresh DEK under `HKDF(secret,…)` in a
+/// slot marked `device`. Returns the envelope blob for the caller to persist. The DEK never leaves wasm.
+#[wasm_bindgen]
+pub async fn enroll_device(secret: &[u8]) -> Result<Vec<u8>, JsValue> {
+    install_panic_hook();
+    enroll_device_inner(secret).await.map_err(|e| JsValue::from_str(&e))
+}
+
 // ---- M3: N-KEK envelope management (pure re-wrap ops — no DB re-encryption) ----
 
 // Hex helpers survive ONLY for the `name|hex` OPFS interchange that vfs.rs's testing-api bundle
@@ -2427,13 +2500,17 @@ pub fn envelope_generation(blob: &[u8]) -> f64 {
     envelope::envelope_generation(blob) as f64
 }
 
-/// List the envelope's unlock methods as `kek_id:kind` pairs, comma-separated (kind: passkey|recovery).
+/// List the envelope's unlock methods as `kek_id:kind` pairs, comma-separated (kind: passkey|recovery|device).
 #[wasm_bindgen]
 pub fn list_methods(blob: &[u8]) -> Result<String, JsValue> {
     let s = envelope::slot_infos(blob)
         .iter()
         .map(|i| {
-            let kind = if i.kind == envelope::KIND_RECOVERY { "recovery" } else { "passkey" };
+            let kind = match i.kind {
+                envelope::KIND_RECOVERY => "recovery",
+                envelope::KIND_DEVICE => "device",
+                _ => "passkey",
+            };
             format!("{}:{kind}", i.kek_id)
         })
         .collect::<Vec<_>>()
@@ -2861,15 +2938,24 @@ fn session_export_inner(cred_id: &[u8], envelope: &[u8]) -> std::result::Result<
             .iter()
             .find(|n| n.as_str() == "app.db")
             .unwrap_or(&db_names[0]);
+        // D-CV5: strip any device-bound convenience slot before it travels — a device key is
+        // meaningless off-device and never belongs in a portable bundle. The pool re-MACs under the
+        // live session DEK (which never leaves the worker); generation is preserved (D-CV7), so the
+        // attested `env_gen` below still matches. Errors if the vault has ONLY a device slot.
+        let export_env = s
+            .util
+            .strip_export_envelope(envelope)
+            .map_err(|e| format!("strip device slot for export: {e:?}"))?;
         // #3c: attest the CURRENT key-envelope generation inside the token so a peer refuses a
-        // rolled-back envelope. The caller passes the current envelope (its rollback-guarded
-        // IndexedDB copy), not a session snapshot — so a method added mid-session is reflected here.
-        let env_gen = envelope::envelope_generation(envelope);
+        // rolled-back envelope. Read it from the STRIPPED envelope (same generation — D-CV7) so the
+        // bundle's embedded envelope and its attested generation agree. The caller passes the current
+        // envelope (its rollback-guarded IndexedDB copy), so a method added mid-session is reflected.
+        let env_gen = envelope::envelope_generation(&export_env);
         let epoch = s
             .util
             .export_epoch(epoch_db, env_gen)
             .map_err(|e| format!("export_epoch {epoch_db}: {e:?}"))?;
-        Ok(bundle::encode(envelope, cred_id, &files, &epoch))
+        Ok(bundle::encode(&export_env, cred_id, &files, &epoch))
     })
 }
 

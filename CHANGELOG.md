@@ -28,6 +28,13 @@ audit and a real cross-browser/device pass**, not on feature completeness. Until
   builds).
 
 ### Added
+- **Convenience tier (device-key unlock)**: opt-in `enrollConvenience()` auto-unlocks a vault on its
+  device with no passkey gesture, keying a slot with a 32-byte secret wrapped under a non-extractable
+  WebCrypto key (never stored in the clear, never in a bundle). The device slot now carries its own
+  envelope `kind` (`KIND_DEVICE`) so `listMethods()` reports it honestly, and `exportBundle()` **strips
+  the device slot** (re-MAC under the session DEK, generation preserved — D-CV7) since a device-bound
+  key is meaningless off-device. A device-only vault refuses to export (nothing left to open it). Proven
+  by `run_tests` **M3e** and the two-context `convenience-e2e` spec. See `docs/convenience-tier-design.md`.
 - **DEK rotation** end to end: `rotateKey()` re-encrypts every DB under a fresh DEK′ and issues a new
   envelope wrapping DEK′ under only the presenting passkey + a fresh recovery code (evicting absent
   methods), staged crash-safely behind a two-store commit barrier.

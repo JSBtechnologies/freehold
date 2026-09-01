@@ -4,6 +4,7 @@ export const memory: WebAssembly.Memory;
 export const add_passkey: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const add_recovery: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const enroll: (a: number, b: number) => any;
+export const enroll_device: (a: number, b: number) => any;
 export const envelope_generation: (a: number, b: number) => number;
 export const gen_recovery: () => [number, number, number, number];
 export const import_bundle: (a: number, b: number) => any;

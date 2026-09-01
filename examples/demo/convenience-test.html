@@ -22,7 +22,18 @@ window.fh = {
   unlock: () => vault.unlock(),
   unlockWithRecovery: (code) => vault.unlockWithRecovery(code),
   isUnlocked: () => vault.isUnlocked(),
+  listMethods: () => vault.listMethods(),
   sql: (q, p, db) => vault.sql(q, p, db),
+  // Base64 bridges for crossing the Playwright boundary (D-CV5 export-strip check).
+  exportBundleB64: async () => {
+    const b = await vault.exportBundle();
+    let s = ''; for (const x of b) s += String.fromCharCode(x); return btoa(s);
+  },
+  importBundleB64: (b64) => {
+    const bin = atob(b64); const u = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+    return vault.importBundle(u);
+  },
   lock: () => vault.lock(),
   close: () => { if (vault) { vault.close(); vault = null; } },
   reset: () => vault.reset(),
