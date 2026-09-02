@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>freehold — sync over REAL blind relay (HttpRelay) e2e harness</title>
+</head>
+<body>
+  <pre id="out">sync-http harness ready</pre>
+  <script type="module">
+    // Headless E2E harness for sync() over the REAL network transport: HttpRelay -> the blind relay
+    // server (server/relay-server.mjs) on a separate origin. Unlike sync-test.html (a Node-bridged
+    // in-memory relay), here two isolated browser contexts converge through an actual HTTP relay that
+    // only ever sees opaque base64 bytes. The relay URL defaults to :5180 (override ?relay=...).
+    import { FreeholdVault } from '../../packages/db/index.js';
+    import { HttpRelay } from '../../packages/db/relay-http.js';
+
+    const out = document.getElementById('out');
+    const log = (m) => { out.textContent += '\n' + m; };
+    const b64enc = (u8) => { const a = u8 instanceof Uint8Array ? u8 : new Uint8Array(u8); let s = ''; for (let i = 0; i < a.length; i++) s += String.fromCharCode(a[i]); return btoa(s); };
+    const b64dec = (b64) => { const s = atob(b64); const a = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) a[i] = s.charCodeAt(i); return a; };
+
+    const RELAY = new URL(location.href).searchParams.get('relay') || 'http://localhost:5180';
+    const http = new HttpRelay(RELAY);
+    // Same TEST-ONLY `pullBlocked` affordance as sync-test.html, to manufacture concurrent version
+    // vectors (a fork) through sync()'s atomic pull-then-push loop. The real relay is untouched — we
+    // only hide new blobs from ONE device's pull for ONE call. Everything else hits the network.
+    const relay = {
+      pullBlocked: false,
+      put: (syncId, sealed) => http.put(syncId, sealed),
+      list: (syncId, since = 0) => (relay.pullBlocked ? 0 : http.list(syncId, since)),
+      get: (syncId, seq) => http.get(syncId, seq),
+    };
+
+    let vault = null;
+    const forks = [];
+
+    window.FH = {
+      async open() {
+        const wasmUrl = new URL('./pkg/freehold.js', location.href);
+        vault = await FreeholdVault.open({ wasmUrl, rpName: 'freehold sync http e2e' });
+        vault.onFork((f) => { forks.push(f); });
+        return true;
+      },
+      isSupported: () => FreeholdVault.isSupported(),
+      relayUrl: () => RELAY,
+      enroll: () => vault.enroll().then(() => true),
+      addRecoveryCode: (code) => vault.addRecoveryCode(code),
+      unlock: () => vault.unlock().then(() => true),
+      unlockWithRecovery: (code) => vault.unlockWithRecovery(code).then(() => true),
+      isUnlocked: () => vault.isUnlocked(),
+      sql: (q, params, db) => vault.sql(q, params, db),
+      exportBundleB64: async () => b64enc(await vault.exportBundle()),
+      importBundleB64: (b64) => vault.importBundle(b64dec(b64)).then(() => true),
+      sync: (opts = {}) => vault.sync({ relay, ...opts }),
+      syncPushNoPull: async () => { relay.pullBlocked = true; try { return await vault.sync({ relay }); } finally { relay.pullBlocked = false; } },
+      // Prove the server-streaming Subscribe path delivers a push notification (opaque: only an index).
+      rawPut: (syncIdB64, blobB64) => http.put(b64dec(syncIdB64), b64dec(blobB64)),
+      subscribeOnce: (syncIdB64, since) => new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error('subscribe timeout')), 15000);
+        http.subscribe(b64dec(syncIdB64), since, (seq) => { clearTimeout(t); resolve(seq); }).catch(reject);
+      }),
+      listForks: () => vault.listForks(),
+      openForkImageLen: async (id) => { const f = await vault.openFork(id); return f && f.image ? (f.image.byteLength ?? f.image.length ?? 0) : 0; },
+      takenForks: () => forks.slice(),
+      close: () => { vault.close(); return true; },
+    };
+
+    log('FH installed on window (HttpRelay -> ' + RELAY + ')');
+  </script>
+</body>
+</html>

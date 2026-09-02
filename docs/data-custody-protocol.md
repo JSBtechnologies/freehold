@@ -5,7 +5,7 @@ version: 0.1
 status: DRAFT 2026-09-01 — design-before-code. Records the model + decisions D-DC1..6; awaiting sign-off before any build. Not yet implemented.
 created: 2026-09-01
 kind: protocol-design
-depends-on: Freehold DB (envelope v3, per-DB HKDF subkeys, DEK rotation/eviction — shipped); Freehold Sync (version-vector engine over a blind relay — engine shipped, real transport pending); per-device SIGNING keys (#7 / sync-epoch §D-SE2 — NOT yet built; gates verifiable attestations)
+depends-on: Freehold DB (envelope v3, per-DB HKDF subkeys, DEK rotation/eviction — shipped); Freehold Sync (version-vector engine over a blind relay — engine shipped; real Connect transport shipped 2026-09-02, see [[transport]]); per-device SIGNING keys (#7 / sync-epoch §D-SE2 — NOT yet built; gates verifiable attestations)
 ---
 
 # Freehold — data-custody protocol (v0.1, design-before-code)
@@ -218,7 +218,12 @@ the split *tangible* (directly answering "how does the split work IRL?"):
 3. **`.proto` contract** for `DataRequest`/`Grant`/`Attestation`/`Disclosure` (D-DC5) — even before a
    server, to freeze the SDK surface.
 4. **Real blind relay over Connect** (Sync plane) — finishes Freehold Sync's missing transport; unary
-   push + server-streaming receive; opaque bytes.
+   push + server-streaming receive; opaque bytes. ✅ **DONE 2026-09-02** ([[transport]] /
+   `docs/transport-design.md`): `.proto` contract (D-DC5), a Node blind relay server (opaque bytes,
+   JSON-codec Connect + SSE Subscribe), and an `HttpRelay` SDK adapter (drop-in for `InMemoryRelay`),
+   proven E2E (`tests/sync-http-e2e.spec.js`: two contexts converge over the real wire, stale, fork +
+   loser-preservation, live Subscribe). **Relay authentication** (rate-limit + `sync_id`-ownership
+   proof) is the next transport item — blindness ≠ authorization.
 5. **Manifest / app-key requester auth** (D-DC2) before opening to untrusted apps.
 6. **Ed25519 vault signing keys (#7)** → verifiable tier-2 attestations light up (D-DC3), no protocol
    change above §6. ✅ **DONE 2026-09-01** ([[vault-signing]]).

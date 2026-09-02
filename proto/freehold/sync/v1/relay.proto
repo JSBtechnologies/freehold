@@ -1,0 +1,73 @@
+// Freehold Sync — blind-relay wire contract (D-DC4 / D-DC5).
+//
+// This is the NORMATIVE contract for the Sync plane. The relay is BLIND BY CONSTRUCTION: every
+// payload that could carry user meaning is an opaque `bytes` field already sealed by the vault under
+// a DEK-derived subkey (crates/freehold/src/sync.rs SyncBlob::seal). The schema describes only
+// *envelopes and routing* — never plaintext fields. A typed transport therefore does NOT cost the
+// server-blind property (data-custody-protocol §2, §8).
+//
+// Streaming shape (D-DC4): browser gRPC-Web has no true bidi (a browser-platform limit), so sync is
+// modelled as unary "push blob" + unary poll (ListBlobs/GetBlob) + server-streaming "receive updates"
+// (Subscribe). The three unary RPCs are exactly the JS BlindRelay contract (put/list/get); Subscribe
+// is the low-latency escape hatch layered on top, never load-bearing for correctness.
+
+syntax = "proto3";
+
+package freehold.sync.v1;
+
+// A content-opaque replication relay. It stores, per routing label `sync_id`, an append-only log of
+// sealed blobs and serves them back by arrival index. It cannot read, order-by, or interpret any
+// blob — it only ever moves `bytes`.
+service RelayService {
+  // Append one sealed blob to sync_id's log. Returns the blob's arrival index (the monotonic pull
+  // cursor position). Idempotency is the caller's concern (the vault's version vector dedups).
+  rpc PushBlob(PushBlobRequest) returns (PushBlobResponse);
+
+  // How many blobs sit at arrival index >= `since` (i.e. how many are new for a client at that
+  // cursor). The unary poll half of "receive updates".
+  rpc ListBlobs(ListBlobsRequest) returns (ListBlobsResponse);
+
+  // Fetch one sealed blob by its arrival index. Absent index -> `blob` empty + `found=false`.
+  rpc GetBlob(GetBlobRequest) returns (GetBlobResponse);
+
+  // Server-streaming "receive updates": emit an event each time a blob at index >= `since` exists or
+  // arrives, so a device can converge without polling. Correctness never depends on it — a client may
+  // ignore Subscribe entirely and use ListBlobs/GetBlob (restricted networks, no-streaming proxies).
+  rpc Subscribe(SubscribeRequest) returns (stream BlobEvent);
+}
+
+// `sync_id` is the ONLY routing key the relay sees: 32 opaque bytes = HKDF(DEK, db_uuid). Devices
+// sharing the DEK derive the same label; it reveals nothing about the user or the contents.
+
+message PushBlobRequest {
+  bytes sync_id = 1; // routing label (opaque)
+  bytes blob = 2;    // sealed SyncBlob (opaque ciphertext)
+}
+message PushBlobResponse {
+  uint64 seq = 1; // arrival index of the appended blob
+}
+
+message ListBlobsRequest {
+  bytes sync_id = 1;
+  uint64 since = 2; // client's current cursor
+}
+message ListBlobsResponse {
+  uint64 count = 1; // blobs at index >= since
+}
+
+message GetBlobRequest {
+  bytes sync_id = 1;
+  uint64 seq = 2;
+}
+message GetBlobResponse {
+  bytes blob = 1;  // empty when found=false
+  bool found = 2;
+}
+
+message SubscribeRequest {
+  bytes sync_id = 1;
+  uint64 since = 2; // stream events for indices >= since
+}
+message BlobEvent {
+  uint64 seq = 1; // arrival index now available to pull
+}

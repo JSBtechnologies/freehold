@@ -6,6 +6,7 @@ import { defineConfig } from '@playwright/test';
 //  - `custody-app` (:5179, cwd examples/custody-app) serves the real Quasar showcase for its own spec.
 const DEMO_PORT = 5178;
 const APP_PORT = 5179;
+const RELAY_PORT = 5180; // the blind relay server (server/relay-server.mjs) for sync-http-e2e
 
 export default defineConfig({
   testDir: './tests',
@@ -33,6 +34,13 @@ export default defineConfig({
       url: `http://localhost:${DEMO_PORT}/sync-test.html`,
       reuseExistingServer: !process.env.CI,
       timeout: 60_000,
+    },
+    {
+      // The blind relay server (opaque bytes only) for the real-transport sync spec.
+      command: `node server/relay-server.mjs ${RELAY_PORT}`,
+      url: `http://localhost:${RELAY_PORT}/healthz`,
+      reuseExistingServer: !process.env.CI,
+      timeout: 30_000,
     },
     {
       // vite.config.js already pins port 5179 + strictPort; predev copies the fresh wasm pkg in.

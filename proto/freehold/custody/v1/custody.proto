@@ -1,0 +1,72 @@
+// Freehold data-custody — Disclosure-plane message family (D-DC5).
+//
+// Frozen here BEFORE any disclosure server exists, so the app SDK surface (DataRequest -> consent ->
+// Grant -> fulfillment) is stable and a third-party client can codegen against it. Same family as the
+// sync relay (freehold/sync/v1/relay.proto): an app integrates custody + sync against one generated
+// client.
+//
+// Blindness carries over: anything sensitive travels as opaque `bytes` the vault has sealed/signed —
+// the grant `proof`, the attestation `signature`, the disclosure `sealed` payload. Typed fields carry
+// only routing + consent metadata a UI must render (who, what, why, tier, lifetime). Ciphertext never
+// becomes a typed plaintext field.
+
+syntax = "proto3";
+
+package freehold.custody.v1;
+
+// The four disclosure tiers (data-custody-protocol §3). A field with no tier defaults to VAULT_ONLY —
+// fail closed toward privacy (D-DC1).
+enum Tier {
+  TIER_UNSPECIFIED = 0; // treated as VAULT_ONLY
+  VAULT_ONLY = 1;       // tier 1: server never needs it
+  ATTESTATION = 2;      // tier 2: a signed fact, not the data
+  DISCLOSURE = 3;       // tier 3: transient, consented borrow
+  LEGAL_RECORD = 4;     // tier 4: provider's legally-required copy (honest hard boundary)
+}
+
+// An app's scoped, purpose-tagged ask (§5.2). Field-granular + machine-readable purpose + lifetime.
+message DataRequest {
+  string app_id = 1;          // authenticated requester identity (origin or manifest key id, §5.1)
+  repeated string fields = 2; // e.g. "profile.email", "profile.over18"
+  string purpose = 3;         // machine-readable, human-rendered ("fulfill order #123")
+  Tier tier = 4;              // the tier the app is requesting fulfilment at
+  bool one_time = 5;          // one-time vs standing
+  uint64 expiry = 6;          // unix seconds; 0 = one-time / no standing lifetime
+  bytes nonce = 7;            // anti-replay / audience binding (verifier challenge)
+}
+
+// The vault's capability token (§5.4, §6). `claims` is the human/routing-visible scope; `proof` is
+// opaque — a DEK-MAC today, an Ed25519 signature once counterparty-verifiable grants are wanted
+// (D-DC3, "swappable grant proof"). Verifiers treat `proof` as bytes; only the issuer's own broker
+// interprets a MAC.
+message Grant {
+  bytes claims = 1;   // canonical encoding of (app_id, fields, purpose, tier, issued_at, expiry, grant_id)
+  bytes proof = 2;    // opaque: DEK-MAC now / Ed25519 sig later
+  string grant_id = 3;
+  uint64 issued_at = 4;
+  uint64 expiry = 5;
+}
+
+// A tier-2 signed fact (§3.2). Mirrors the shipped vault-signing attestation exactly (attest.rs):
+// the vault signs a domain-separated message binding claim || audience || issued_at || expiry; a
+// remote verifier checks `signature` against `public_key` with no DEK.
+message Attestation {
+  string claim = 1;      // "profile.over18=true"
+  bytes audience = 2;    // anti-replay binding (verifier challenge / origin)
+  uint64 issued_at = 3;
+  uint64 expiry = 4;
+  bytes public_key = 5;  // Ed25519 vault-identity public key (32 bytes)
+  bytes signature = 6;   // Ed25519 signature (64 bytes)
+}
+
+// A tier-3 borrow (§3.3, §5.7): a single-use, purpose-tagged slice with a non-retention receipt.
+// `sealed` is opaque — the disclosed leaf is encrypted to the counterparty out of band; the relay /
+// broker only routes it.
+message Disclosure {
+  string grant_id = 1;   // the consuming grant
+  repeated string fields = 2;
+  string purpose = 3;
+  bytes sealed = 4;      // opaque disclosed payload
+  uint64 issued_at = 5;
+  bool non_retention = 6; // receipt asserts process-and-forget
+}

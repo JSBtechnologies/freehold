@@ -28,6 +28,20 @@ audit and a real cross-browser/device pass**, not on feature completeness. Until
   builds).
 
 ### Added
+- **Real blind-relay transport (Sync plane over Connect)**: the version-vector sync engine now has a
+  network wire, not just the in-memory mock. A frozen `.proto` contract
+  (`proto/freehold/sync/v1/relay.proto` — `PushBlob`/`ListBlobs`/`GetBlob` + server-streaming
+  `Subscribe`; opaque `bytes` only), a zero-dependency Node **blind relay server**
+  (`server/relay-server.mjs`; Connect JSON codec + SSE Subscribe; blind by construction — it only ever
+  moves base64 blobs), and an **`HttpRelay`** SDK adapter (`@freehold/db/relay-http`) that is a drop-in
+  for `InMemoryRelay`, so `sync({ relay })` works unchanged over the wire. The transport carries the
+  security boundary, it does not define it — blobs are sealed under a DEK subkey before they reach it
+  and the relay stays server-blind (data-custody §2). The Disclosure-plane message family
+  (`DataRequest`/`Grant`/`Attestation`/`Disclosure`) is frozen in `proto/freehold/custody/v1/` so the
+  app SDK surface is stable, even though disclosure still runs on the Local-plane broker. Proven E2E by
+  `tests/sync-http-e2e.spec.js` (two browser contexts converge over a real HTTP relay; stale; fork with
+  loser-preservation; live Subscribe). Next transport item: relay authentication (rate-limit +
+  `sync_id`-ownership proof) — blindness is not authorization. See `docs/transport-design.md`.
 - **Verifiable tier-2 attestations (vault signing key)**: a DEK-derived **Ed25519 vault identity**
   (`HKDF(DEK, "freehold-vault-identity-v1")` — same across a user's devices, never persisted) signs a
   tier-2 claim ("18+ ✓") bound to a verifier **audience** (anti-replay) and an expiry. A remote party

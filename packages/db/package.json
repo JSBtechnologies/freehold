@@ -7,13 +7,16 @@
   "types": "./index.d.ts",
   "exports": {
     ".": { "types": "./index.d.ts", "default": "./index.js" },
-    "./relay-mem": { "types": "./relay-mem.d.ts", "default": "./relay-mem.js" }
+    "./relay-mem": { "types": "./relay-mem.d.ts", "default": "./relay-mem.js" },
+    "./relay-http": { "types": "./relay-http.d.ts", "default": "./relay-http.js" }
   },
   "files": [
     "index.js",
     "index.d.ts",
     "relay-mem.js",
     "relay-mem.d.ts",
+    "relay-http.js",
+    "relay-http.d.ts",
     "vault-worker.js",
     "README.md"
   ],
