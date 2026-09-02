@@ -1,8 +1,11 @@
 import { defineConfig } from '@playwright/test';
 
-// Headless E2E for the @freehold/db sync() orchestration. One vite dev server (cwd examples/demo)
-// serves the real SDK + wasm; the spec spins up two ISOLATED browser contexts as two "devices".
-const PORT = 5178;
+// Headless E2E for Freehold. Two dev servers, two projects:
+//  - `demo` (:5178, cwd examples/demo) serves the SDK + wasm test harnesses for the core specs
+//    (run_tests, rotate, sync, backup, convenience, attest, custody, decrypt-fixture).
+//  - `custody-app` (:5179, cwd examples/custody-app) serves the real Quasar showcase for its own spec.
+const DEMO_PORT = 5178;
+const APP_PORT = 5179;
 
 export default defineConfig({
   testDir: './tests',
@@ -10,15 +13,34 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   reporter: [['list']],
-  use: {
-    baseURL: `http://localhost:${PORT}`,
-    headless: true,
-  },
-  webServer: {
-    command: 'npm run dev -- --port ' + PORT + ' --strictPort',
-    cwd: 'examples/demo',
-    url: `http://localhost:${PORT}/sync-test.html`,
-    reuseExistingServer: !process.env.CI,
-    timeout: 60_000,
-  },
+  use: { headless: true },
+  projects: [
+    {
+      name: 'demo',
+      use: { baseURL: `http://localhost:${DEMO_PORT}` },
+      testIgnore: '**/custody-app-e2e.spec.js',
+    },
+    {
+      name: 'custody-app',
+      use: { baseURL: `http://localhost:${APP_PORT}` },
+      testMatch: '**/custody-app-e2e.spec.js',
+    },
+  ],
+  webServer: [
+    {
+      command: `npm run dev -- --port ${DEMO_PORT} --strictPort`,
+      cwd: 'examples/demo',
+      url: `http://localhost:${DEMO_PORT}/sync-test.html`,
+      reuseExistingServer: !process.env.CI,
+      timeout: 60_000,
+    },
+    {
+      // vite.config.js already pins port 5179 + strictPort; predev copies the fresh wasm pkg in.
+      command: 'npm run dev',
+      cwd: 'examples/custody-app',
+      url: `http://localhost:${APP_PORT}/`,
+      reuseExistingServer: !process.env.CI,
+      timeout: 120_000,
+    },
+  ],
 });
