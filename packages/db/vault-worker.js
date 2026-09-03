@@ -16,6 +16,8 @@ const OPS = new Set([
   // Freehold Sync (freehold-sync-design §10 item 3): crypto + conflict logic in wasm; the loop in JS.
   'session_sync_id', 'session_sync_seal', 'session_sync_open', 'session_sync_apply',
   'sync_vv_empty', 'sync_vv_increment', 'sync_vv_merge', 'sync_reconcile',
+  // Relay auth (docs/relay-auth-design.md): sign a blind-relay op with the per-DB DEK-derived key.
+  'session_relay_sign',
 ]);
 
 // Hand result buffers back by transfer where possible (bundles can be MBs — don't copy them twice).

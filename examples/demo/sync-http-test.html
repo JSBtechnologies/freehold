@@ -11,7 +11,7 @@
     // server (server/relay-server.mjs) on a separate origin. Unlike sync-test.html (a Node-bridged
     // in-memory relay), here two isolated browser contexts converge through an actual HTTP relay that
     // only ever sees opaque base64 bytes. The relay URL defaults to :5180 (override ?relay=...).
-    import { FreeholdVault } from '../../packages/db/index.js';
+    import { FreeholdVault, RelayMethod } from '../../packages/db/index.js';
     import { HttpRelay } from '../../packages/db/relay-http.js';
 
     const out = document.getElementById('out');
@@ -26,9 +26,9 @@
     // only hide new blobs from ONE device's pull for ONE call. Everything else hits the network.
     const relay = {
       pullBlocked: false,
-      put: (syncId, sealed) => http.put(syncId, sealed),
-      list: (syncId, since = 0) => (relay.pullBlocked ? 0 : http.list(syncId, since)),
-      get: (syncId, seq) => http.get(syncId, seq),
+      put: (syncId, sealed, auth) => http.put(syncId, sealed, auth),
+      list: (syncId, since = 0, auth) => (relay.pullBlocked ? 0 : http.list(syncId, since, auth)),
+      get: (syncId, seq, auth) => http.get(syncId, seq, auth),
     };
 
     let vault = null;
@@ -53,12 +53,30 @@
       importBundleB64: (b64) => vault.importBundle(b64dec(b64)).then(() => true),
       sync: (opts = {}) => vault.sync({ relay, ...opts }),
       syncPushNoPull: async () => { relay.pullBlocked = true; try { return await vault.sync({ relay }); } finally { relay.pullBlocked = false; } },
-      // Prove the server-streaming Subscribe path delivers a push notification (opaque: only an index).
-      rawPut: (syncIdB64, blobB64) => http.put(b64dec(syncIdB64), b64dec(blobB64)),
-      subscribeOnce: (syncIdB64, since) => new Promise((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error('subscribe timeout')), 15000);
-        http.subscribe(b64dec(syncIdB64), since, (seq) => { clearTimeout(t); resolve(seq); }).catch(reject);
-      }),
+      // Prove the server-streaming Subscribe path delivers a push notification (opaque: only an index),
+      // over an AUTHENTICATED bucket. `dbUuidB64` is a fresh 16-byte id the vault never syncs, so the
+      // bucket starts empty (deterministic seq 0); the vault's relay-auth key signs each op.
+      rawPutAuthed: async (dbUuidB64, blobB64) => {
+        const dbUuid = b64dec(dbUuidB64), blob = b64dec(blobB64);
+        const syncId = await vault.syncId(dbUuid);
+        const auth = await vault.relayAuth(RelayMethod.Push, blob, dbUuid);
+        return http.put(syncId, blob, auth);
+      },
+      subscribeOnceAuthed: async (dbUuidB64, since) => {
+        const dbUuid = b64dec(dbUuidB64);
+        const syncId = await vault.syncId(dbUuid);
+        const auth = await vault.relayAuth(RelayMethod.Subscribe, undefined, dbUuid);
+        return new Promise((resolve, reject) => {
+          const t = setTimeout(() => reject(new Error('subscribe timeout')), 15000);
+          http.subscribe(syncId, since, (seq) => { clearTimeout(t); resolve(seq); }, { auth }).catch(reject);
+        });
+      },
+      // Negative control: a push with NO relay-auth must be rejected by the server (blindness ≠ access).
+      rawPutUnsigned: async (dbUuidB64, blobB64) => {
+        const syncId = await vault.syncId(b64dec(dbUuidB64));
+        try { await http.put(syncId, b64dec(blobB64)); return 'ACCEPTED'; }
+        catch (e) { return 'REJECTED: ' + e.message; }
+      },
       listForks: () => vault.listForks(),
       openForkImageLen: async (id) => { const f = await vault.openFork(id); return f && f.image ? (f.image.byteLength ?? f.image.length ?? 0) : 0; },
       takenForks: () => forks.slice(),

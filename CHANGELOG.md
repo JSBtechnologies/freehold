@@ -28,6 +28,17 @@ audit and a real cross-browser/device pass**, not on feature completeness. Until
   builds).
 
 ### Added
+- **Relay authentication (blind-relay access control)**: the blind relay now authorizes every op
+  without ever seeing the DEK (`docs/relay-auth-design.md`, D-RA1). Each database has a DEK-derived
+  Ed25519 relay-auth key (`HKDF(DEK, "…relay-auth-v1" ‖ db_uuid)`), and `sync_id` is now **bound** to
+  its public key — `sync_id = SHA-256("freehold-sync-id-v1" ‖ pubkey)[..16]` — so the relay authorizes
+  **statelessly**: it checks `sync_id == H(pubkey)` and an Ed25519 signature over a domain-separated op
+  message (a Push binds its exact blob bytes; reads sign empty). Possession of the bucket *is*
+  possession of the key — no trust-on-first-use, no land-grab — plus a per-key rate limit. `sync()`
+  signs every op in the worker; `HttpRelay` forwards `{pubkey, sig}`; the zero-dependency Node relay
+  verifies with built-in `crypto`. New public API: `vault.relayAuth()` / `vault.syncId()` /
+  `RelayMethod` for driving a relay directly. E2E proves an unsigned push is rejected. No new crypto —
+  the audited Ed25519 + HKDF primitives, used as-is. Blindness/unlinkability unchanged (per-DB key).
 - **Real blind-relay transport (Sync plane over Connect)**: the version-vector sync engine now has a
   network wire, not just the in-memory mock. A frozen `.proto` contract
   (`proto/freehold/sync/v1/relay.proto` — `PushBlob`/`ListBlobs`/`GetBlob` + server-streaming

@@ -2018,10 +2018,21 @@ impl OpfsSAHPool {
     // DEK stays inside the pool. Only the opaque 16-byte `sync_id` (a capability, not the key) and
     // blobs sealed under `sync_crypto` ever cross out — the relay/JS never see the DEK itself.
     fn sync_id(&self, db_uuid: &[u8; 16]) -> [u8; 16] {
-        crypto::sync_id(&self.dek, db_uuid)
+        crate::relay_auth::sync_id(&self.dek, db_uuid)
     }
     fn sync_crypto(&self) -> Crypto {
         Crypto::sync_key(&self.dek)
+    }
+    // ENC (relay-auth, docs/relay-auth-design.md): sign a blind-relay op with the per-DB DEK-derived
+    // Ed25519 auth key so the relay authorizes the caller without ever seeing the DEK. Returns
+    // pubkey(32) ‖ sig(64); `sync_id == SHA-256(LABEL ‖ pubkey)[..16]` binds the signature to the
+    // bucket. The DEK never leaves the pool — only the public key and the signature cross out.
+    fn relay_sign(&self, db_uuid: &[u8; 16], method: u8, arg: &[u8]) -> [u8; 96] {
+        let (pk, sig) = crate::relay_auth::sign(&self.dek, db_uuid, method, arg);
+        let mut out = [0u8; 96];
+        out[..32].copy_from_slice(&pk);
+        out[32..].copy_from_slice(&sig);
+        out
     }
 
     // Apply a peer's epoch token: verify under K_epoch, then RAISE this device's local anchor
@@ -3103,6 +3114,14 @@ impl OpfsSAHPoolUtil {
     /// a capability the device holds, safe to hand to the relay — it is NOT the key.
     pub fn sync_id(&self, db_uuid: &[u8; 16]) -> [u8; 16] {
         self.pool.sync_id(db_uuid)
+    }
+
+    /// ENC (relay-auth, docs/relay-auth-design.md): sign a blind-relay op (`method` ∈ {1=Push,
+    /// 2=List, 3=Get, 4=Subscribe}) over `arg` with the per-DB DEK-derived Ed25519 auth key. Returns
+    /// pubkey(32) ‖ sig(64); the relay verifies statelessly (`sync_id == SHA-256(LABEL ‖ pubkey)[..16]`
+    /// ∧ Ed25519 ok). The DEK never leaves the pool. Requires the REAL DEK.
+    pub fn relay_sign(&self, db_uuid: &[u8; 16], method: u8, arg: &[u8]) -> [u8; 96] {
+        self.pool.relay_sign(db_uuid, method, arg)
     }
 
     /// ENC (freehold-sync-design §5): the DEK-derived subkey that seals/opens sync blobs. Returned as

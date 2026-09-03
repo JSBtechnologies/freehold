@@ -111,6 +111,14 @@ export function session_open(prf: Uint8Array, blob: Uint8Array, epoch: Uint8Arra
 export function session_open_recovery(code: string, blob: Uint8Array, epoch: Uint8Array): Promise<void>;
 
 /**
+ * Sign a blind-relay op for the live session (docs/relay-auth-design.md). `method` ∈ {1=Push,
+ * 2=List, 3=Get, 4=Subscribe}; `arg` binds a Push to its blob bytes (empty for reads). Returns
+ * pubkey(32) ‖ sig(64) — the SDK hands both to the relay, which authorizes statelessly. Requires an
+ * open session; the DEK never leaves the worker.
+ */
+export function session_relay_sign(db_uuid: Uint8Array, method: number, arg: Uint8Array): Uint8Array;
+
+/**
  * Run SQL against named DB `db` in the live session. `params_json` is a JSON array bound to `?`
  * placeholders (empty string or "[]" = none; then multi-statement scripts are allowed). Returns
  * a JSON array of row arrays (stringified values, NULL → null); no rows yields "[]".
@@ -192,6 +200,7 @@ export interface InitOutput {
     readonly session_lock: () => [number, number];
     readonly session_open: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
     readonly session_open_recovery: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
+    readonly session_relay_sign: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly session_sql: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly session_sync_apply: (a: number, b: number) => [number, number];
     readonly session_sync_id: (a: number, b: number) => [number, number, number, number];

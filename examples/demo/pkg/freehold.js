@@ -319,6 +319,30 @@ export function session_open_recovery(code, blob, epoch) {
 }
 
 /**
+ * Sign a blind-relay op for the live session (docs/relay-auth-design.md). `method` ∈ {1=Push,
+ * 2=List, 3=Get, 4=Subscribe}; `arg` binds a Push to its blob bytes (empty for reads). Returns
+ * pubkey(32) ‖ sig(64) — the SDK hands both to the relay, which authorizes statelessly. Requires an
+ * open session; the DEK never leaves the worker.
+ * @param {Uint8Array} db_uuid
+ * @param {number} method
+ * @param {Uint8Array} arg
+ * @returns {Uint8Array}
+ */
+export function session_relay_sign(db_uuid, method, arg) {
+    const ptr0 = passArray8ToWasm0(db_uuid, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(arg, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.session_relay_sign(ptr0, len0, method, ptr1, len1);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v3;
+}
+
+/**
  * Run SQL against named DB `db` in the live session. `params_json` is a JSON array bound to `?`
  * placeholders (empty string or "[]" = none; then multi-statement scripts are allowed). Returns
  * a JSON array of row arrays (stringified values, NULL → null); no rows yields "[]".
@@ -944,7 +968,7 @@ function __wbg_get_imports() {
             return ret;
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 716, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 717, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__ha22148a4a7c1d5ff);
             return ret;
         },

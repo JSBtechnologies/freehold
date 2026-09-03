@@ -222,9 +222,15 @@ the split *tangible* (directly answering "how does the split work IRL?"):
    `docs/transport-design.md`): `.proto` contract (D-DC5), a Node blind relay server (opaque bytes,
    JSON-codec Connect + SSE Subscribe), and an `HttpRelay` SDK adapter (drop-in for `InMemoryRelay`),
    proven E2E (`tests/sync-http-e2e.spec.js`: two contexts converge over the real wire, stale, fork +
-   loser-preservation, live Subscribe). **Relay authentication** (rate-limit + `sync_id`-ownership
-   proof) is the next transport item — blindness ≠ authorization.
-5. **Manifest / app-key requester auth** (D-DC2) before opening to untrusted apps.
+   loser-preservation, live Subscribe). **Relay authentication** is now ✅ **DONE 2026-09-02**
+   ([[relay-auth]] / `docs/relay-auth-design.md`, D-RA1): per-DB DEK-derived Ed25519 auth key, with
+   `sync_id` **bound** to its public key (`SHA-256(LABEL ‖ pubkey)[..16]`) so the relay authorizes
+   statelessly (`sync_id == H(pubkey)` ∧ Ed25519 sig over a domain-separated op message) — no
+   trust-on-first-use / land-grab — plus a per-key rate limit. Blindness ≠ authorization, now closed
+   for the Sync plane; the DEK never reaches the relay, and no new crypto (audited Ed25519/HKDF as-is).
+5. **Manifest / app-key requester auth** (D-DC2) before opening to untrusted apps — the next item;
+   this authorizes the *Disclosure* plane (third-party apps), distinct from the Sync-plane relay auth
+   above (a vault talking to its own buckets).
 6. **Ed25519 vault signing keys (#7)** → verifiable tier-2 attestations light up (D-DC3), no protocol
    change above §6. ✅ **DONE 2026-09-01** ([[vault-signing]]).
 

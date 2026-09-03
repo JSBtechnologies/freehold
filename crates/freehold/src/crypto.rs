@@ -133,23 +133,10 @@ impl Crypto {
     }
 }
 
-/// The opaque per-database **sync-id** used to name a user's blob bucket on the blind relay
-/// (freehold-sync-design §4): `sync_id = HKDF(DEK, "freehold-sync-id-v1" ‖ db_uuid)`, truncated to
-/// 128 bits. Deterministic across the user's devices (they share the DEK), unlinkable to identity,
-/// and unnameable without the DEK — the relay routes blobs under it but learns nothing from it.
-///
-/// This is derived directly off the DEK (not a `Crypto` cipher instance) because it is a public
-/// routing label, not a key; it never seals anything.
-pub fn sync_id(dek: &[u8; 32], db_uuid: &[u8; 16]) -> [u8; 16] {
-    let mut info = [0u8; 19 + 16];
-    info[..19].copy_from_slice(b"freehold-sync-id-v1");
-    info[19..].copy_from_slice(db_uuid);
-    let hk = Hkdf::<Sha256>::new(None, dek);
-    let mut out = [0u8; 16];
-    hk.expand(&info, &mut out)
-        .expect("HKDF expand of 16 bytes never fails");
-    out
-}
+// The per-database **sync-id** (the blind-relay bucket name) now lives in `relay_auth` — it is bound
+// to the relay-auth public key (`SHA-256(LABEL ‖ pubkey)[..16]`) so the relay can authorize access
+// statelessly (docs/relay-auth-design.md, D-RA1). It moved out of this file to keep the crypto core
+// scoped to the block/blob AEAD; `relay_auth::sync_id` is the single source of truth.
 
 impl Crypto {
 

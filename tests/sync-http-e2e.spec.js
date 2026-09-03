@@ -113,13 +113,19 @@ test('sync() over a REAL HTTP blind relay: convergence, stale, fork; + server-st
   const imgLen = await any.page.evaluate((id) => window.FH.openForkImageLen(id), any.list[0].id);
   expect(imgLen).toBeGreaterThan(0);
 
-  // ---- Server-streaming Subscribe: a blind push notification carries ONLY an arrival index ----
-  // Use a fresh random sync_id so the count is deterministic. Subscribe first, then push -> event.
-  const syncIdB64 = await pageA.evaluate(() => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))));
+  // ---- Relay AUTH: an unsigned push is rejected (blindness ≠ access, docs/relay-auth-design.md) ----
+  // A fresh 16-byte db_uuid the vault never syncs → its own bucket, authenticated by the vault's key.
+  const dbUuidB64 = await pageA.evaluate(() => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16)))));
   const blobB64 = btoa('opaque-sealed-bytes');
-  const seqPromise = pageA.evaluate((sid) => window.FH.subscribeOnce(sid, 0), syncIdB64);
+  const unsigned = await pageA.evaluate(({ id, blob }) => window.FH.rawPutUnsigned(id, blob), { id: dbUuidB64, blob: blobB64 });
+  console.log('[auth] unsigned push =', unsigned);
+  expect(unsigned).toContain('REJECTED');
+
+  // ---- Server-streaming Subscribe: a blind push notification carries ONLY an arrival index ----
+  // Authenticated Subscribe on the (empty) bucket, then an authenticated push -> deterministic seq 0.
+  const seqPromise = pageA.evaluate((id) => window.FH.subscribeOnceAuthed(id, 0), dbUuidB64);
   await pageA.waitForTimeout(300); // let the SSE stream attach before we push
-  await pageB.evaluate(({ sid, blob }) => window.FH.rawPut(sid, blob), { sid: syncIdB64, blob: blobB64 });
+  await pageA.evaluate(({ id, blob }) => window.FH.rawPutAuthed(id, blob), { id: dbUuidB64, blob: blobB64 });
   const gotSeq = await seqPromise;
   console.log('[subscribe] delivered seq =', gotSeq);
   expect(gotSeq).toBe(0);

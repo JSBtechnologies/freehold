@@ -30,6 +30,7 @@ mod bundle;
 mod crypto;
 mod envelope;
 mod manifest;
+mod relay_auth;
 mod sync;
 mod vfs;
 
@@ -444,10 +445,12 @@ async fn sync_test() -> std::result::Result<String, String> {
 
     // Sanity: the version-vector algebra + reconcile determinism, before the device dance.
     sync::self_check()?;
+    // Relay-auth key derivation, the pubkey↔sync_id commitment, and sign/verify (docs/relay-auth-design.md).
+    relay_auth::self_check()?;
 
     // One logical DB → one relay bucket. sync_id is opaque to the relay, derived off the shared DEK.
     let db_uuid: [u8; 16] = *b"freehold-sy-uuid";
-    let sync_id = crypto::sync_id(&DEK_OK, &db_uuid);
+    let sync_id = relay_auth::sync_id(&DEK_OK, &db_uuid);
     let sync = crypto::Crypto::sync_key(&DEK_OK);
     let mut relay = InMemoryRelay::new();
 
@@ -3257,6 +3260,20 @@ fn sync_reconcile_inner(local_vv: &[u8], incoming_vv: &[u8]) -> std::result::Res
 pub fn session_sync_id(db_uuid: &[u8]) -> Result<Vec<u8>, JsValue> {
     install_panic_hook();
     session_sync_id_inner(db_uuid).map_err(|e| JsValue::from_str(&e))
+}
+
+/// Sign a blind-relay op for the live session (docs/relay-auth-design.md). `method` ∈ {1=Push,
+/// 2=List, 3=Get, 4=Subscribe}; `arg` binds a Push to its blob bytes (empty for reads). Returns
+/// pubkey(32) ‖ sig(64) — the SDK hands both to the relay, which authorizes statelessly. Requires an
+/// open session; the DEK never leaves the worker.
+#[wasm_bindgen]
+pub fn session_relay_sign(db_uuid: &[u8], method: u8, arg: &[u8]) -> Result<Vec<u8>, JsValue> {
+    install_panic_hook();
+    (|| -> std::result::Result<Vec<u8>, String> {
+        let u = slice16(db_uuid, "db_uuid")?;
+        with_session(|util| util.relay_sign(&u, method, arg).to_vec())
+    })()
+    .map_err(|e| JsValue::from_str(&e))
 }
 
 /// Seal the live session's current image + `vv` into a relay blob under the DEK-derived sync_key.

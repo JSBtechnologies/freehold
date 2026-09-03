@@ -30,6 +30,11 @@ const b64dec = (b64) => {
   return a;
 };
 
+// Relay-auth envelope → the two extra JSON fields the relay checks (docs/relay-auth-design.md). When
+// no auth is supplied (e.g. a legacy caller) the fields are omitted and the relay rejects the op.
+const authFields = (auth) =>
+  auth && auth.pubkey && auth.sig ? { pubkey: b64enc(auth.pubkey), sig: b64enc(auth.sig) } : {};
+
 export class HttpRelay {
   #base;
   #fetch;
@@ -66,21 +71,22 @@ export class HttpRelay {
     return json;
   }
 
-  /** Append a sealed blob; resolves to its arrival index. */
-  async put(syncId, sealed) {
-    const r = await this.#rpc('PushBlob', { syncId: b64enc(syncId), blob: b64enc(sealed) });
+  /** Append a sealed blob; resolves to its arrival index. `auth` = `{ pubkey, sig }` (relay-auth,
+   *  docs/relay-auth-design.md) — the vault signs each op; the relay rejects an unsigned/bad one. */
+  async put(syncId, sealed, auth) {
+    const r = await this.#rpc('PushBlob', { syncId: b64enc(syncId), blob: b64enc(sealed), ...authFields(auth) });
     return Number(r.seq ?? 0);
   }
 
   /** Count of blobs at index >= `since`. */
-  async list(syncId, since = 0) {
-    const r = await this.#rpc('ListBlobs', { syncId: b64enc(syncId), since: String(since) });
+  async list(syncId, since = 0, auth) {
+    const r = await this.#rpc('ListBlobs', { syncId: b64enc(syncId), since: String(since), ...authFields(auth) });
     return Number(r.count ?? 0);
   }
 
   /** Fetch one sealed blob by arrival index, or null if out of range. */
-  async get(syncId, seq) {
-    const r = await this.#rpc('GetBlob', { syncId: b64enc(syncId), seq: String(seq) });
+  async get(syncId, seq, auth) {
+    const r = await this.#rpc('GetBlob', { syncId: b64enc(syncId), seq: String(seq), ...authFields(auth) });
     return r.found && r.blob ? b64dec(r.blob) : null;
   }
 
@@ -90,11 +96,11 @@ export class HttpRelay {
    * for correctness — sync() converges on the unary poll path alone; this only avoids polling.
    * (Browser EnvironmentEventSource can't POST a body, so we stream the response manually via fetch.)
    */
-  async subscribe(syncId, since, onSeq, { signal } = {}) {
+  async subscribe(syncId, since, onSeq, { signal, auth } = {}) {
     const res = await this.#fetch(`${this.#base}/${SVC}/Subscribe`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ syncId: b64enc(syncId), since: String(since) }),
+      body: JSON.stringify({ syncId: b64enc(syncId), since: String(since), ...authFields(auth) }),
       signal,
     });
     if (!res.ok || !res.body) throw new Error(`HttpRelay Subscribe: HTTP ${res.status}`);

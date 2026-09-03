@@ -13,9 +13,21 @@ const PRF_SALT = new TextEncoder().encode('freehold/passkey-prf/v1');
 const DEFAULT_RP_NAME = 'freehold demo';
 
 // The whole-vault sync bucket is scoped by the DEK, so a FIXED 16-byte db_uuid is correct: every
-// device sharing the DEK derives the SAME sync_id = HKDF(DEK, db_uuid); different users (different
-// DEK) never collide. Exactly 16 bytes — a protocol constant, do not change (it re-buckets everyone).
+// device sharing the DEK derives the SAME sync_id (and the SAME relay-auth key) from it; different
+// users (different DEK) never collide. Exactly 16 bytes — a protocol constant, do not change (it
+// re-buckets everyone). sync_id = SHA-256("freehold-sync-id-v1" ‖ relay_auth_pubkey)[..16] so the
+// relay can authorize access statelessly (docs/relay-auth-design.md).
 const SYNC_DB_UUID = new TextEncoder().encode('freehold/vault/1');
+
+// Relay-auth op codes bound into each signed request (must match crates/freehold/src/relay_auth.rs
+// and server/relay-server.mjs). Reads sign an empty arg (idempotent, one credential reused per pass);
+// a Push signs its blob bytes so a captured signature cannot store different bytes.
+const RELAY_PUSH = 1, RELAY_LIST = 2, RELAY_GET = 3, RELAY_SUBSCRIBE = 4;
+const EMPTY = new Uint8Array(0);
+
+/** Relay-auth op codes for `vault.relayAuth(method, ...)` when driving a BlindRelay directly
+ *  (docs/relay-auth-design.md). sync() uses these internally; you only need them for raw ops. */
+export const RelayMethod = { Push: RELAY_PUSH, List: RELAY_LIST, Get: RELAY_GET, Subscribe: RELAY_SUBSCRIBE };
 
 const rand = (n) => crypto.getRandomValues(new Uint8Array(n));
 
@@ -652,11 +664,37 @@ export class FreeholdVault {
     return this.#call('session_sync_open', [f.sealed]);
   }
 
+  /** Sign a blind-relay op with the per-vault DEK-derived relay-auth key (docs/relay-auth-design.md).
+   *  Returns `{ pubkey, sig }` (Uint8Array 32/64) that the relay verifies statelessly — the DEK never
+   *  leaves the worker. A relay that needs no auth (InMemoryRelay) simply ignores the extra argument. */
+  async #relayAuth(method, arg = EMPTY) {
+    const pk96 = await this.#call('session_relay_sign', [SYNC_DB_UUID, method, arg]);
+    return { pubkey: pk96.slice(0, 32), sig: pk96.slice(32) };
+  }
+
+  /** The opaque 16-byte relay bucket id for `dbUuid` (default the vault's sync bucket). Safe to hand
+   *  to a relay — it is a commitment to the DEK-derived auth key, not the key. Requires an open session. */
+  async syncId(dbUuid = SYNC_DB_UUID) {
+    if (!(await this.isUnlocked())) throw new Error('vault is locked — unlock() before syncId()');
+    return this.#call('session_sync_id', [dbUuid]);
+  }
+
+  /** Sign a blind-relay op for `dbUuid`'s bucket with the DEK-derived relay-auth key — for advanced
+   *  callers driving a BlindRelay (e.g. HttpRelay) directly (docs/relay-auth-design.md). `method` is a
+   *  {@link RelayMethod} code; `arg` binds a Push to its blob bytes (empty for reads). sync() does this
+   *  for you; you only need it to authenticate a raw put/list/get/subscribe. Requires an open session. */
+  async relayAuth(method, arg = EMPTY, dbUuid = SYNC_DB_UUID) {
+    if (!(await this.isUnlocked())) throw new Error('vault is locked — unlock() before relayAuth()');
+    const pk96 = await this.#call('session_relay_sign', [dbUuid, method, arg]);
+    return { pubkey: pk96.slice(0, 32), sig: pk96.slice(32) };
+  }
+
   /**
    * Pull new blobs from the relay, reconcile each against local state (fast-forward / stale / fork),
    * apply winners into the live session, preserve fork losers, then push the current state. Blobs on
    * the wire are ciphertext sealed under a DEK-subkey; the relay only ever sees opaque bytes.
-   * `relay` implements the BlindRelay contract (put/list/get) — e.g. `new InMemoryRelay()`.
+   * `relay` implements the BlindRelay contract (put/list/get, each taking an optional `auth`) — e.g.
+   * `new InMemoryRelay()` (ignores auth) or `new HttpRelay(url)` (forwards it; the relay enforces it).
    * `{ push = true }` — set false to pull-only. Resolves to a report `{ pushed, pulled, applied, forks }`.
    */
   async sync({ relay, push = true } = {}) {
@@ -671,10 +709,15 @@ export class FreeholdVault {
     const forks = await this.#syncForks();
     const report = { pushed: false, pulled: 0, applied: 0, forks: 0 };
 
+    // Read credentials (List/Get) are idempotent, so one signature each is reused across this pass.
+    const listAuth = await this.#relayAuth(RELAY_LIST);
+    let getAuth = null; // lazily signed only if there is anything to pull
+
     // ---- PULL: consume every blob at seq ≥ cursor, reconcile in order ----
-    const count = await relay.list(syncId, cursor);
+    const count = await relay.list(syncId, cursor, listAuth);
     for (let i = 0; i < count; i++) {
-      const sealed = await relay.get(syncId, cursor + i);
+      getAuth ||= await this.#relayAuth(RELAY_GET);
+      const sealed = await relay.get(syncId, cursor + i, getAuth);
       if (!sealed) continue;
       report.pulled++;
       const incoming = await this.#call('session_sync_open', [sealed]);
@@ -711,8 +754,9 @@ export class FreeholdVault {
     if (push) {
       localVv = await this.#call('sync_vv_increment', [localVv, deviceId]);
       const blob = await this.#call('session_sync_seal', [SYNC_DB_UUID, localVv]);
-      await relay.put(syncId, blob);
-      cursor = await relay.list(syncId, 0); // we've now seen everything up to and including our push
+      // The Push signature binds the exact blob bytes: a captured signature cannot store other bytes.
+      await relay.put(syncId, blob, await this.#relayAuth(RELAY_PUSH, blob));
+      cursor = await relay.list(syncId, 0, listAuth); // seen everything up to and including our push
       report.pushed = true;
     }
 

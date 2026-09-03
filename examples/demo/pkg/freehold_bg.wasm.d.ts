@@ -19,6 +19,7 @@ export const session_export: (a: number, b: number, c: number, d: number) => [nu
 export const session_lock: () => [number, number];
 export const session_open: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
 export const session_open_recovery: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
+export const session_relay_sign: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const session_sql: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const session_sync_apply: (a: number, b: number) => [number, number];
 export const session_sync_id: (a: number, b: number) => [number, number, number, number];

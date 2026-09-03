@@ -46,17 +46,28 @@ export interface BundleMeta {
 /** Row values from sql(): everything is stringified by the wasm core; SQL NULL becomes null. */
 export type SqlValue = string | null;
 
+/** A per-op relay-auth envelope (docs/relay-auth-design.md): the vault's per-DB Ed25519 public key
+ *  and its signature over the op. The relay authorizes statelessly; a transport that needs no auth
+ *  (InMemoryRelay) ignores it. `sync()` produces these from the worker — callers never build them. */
+export interface RelayAuth {
+  pubkey: Uint8Array; // 32-byte relay-auth public key (== the bucket commitment preimage)
+  sig: Uint8Array;    // 64-byte Ed25519 signature over the canonical op message
+}
+
+/** Relay-auth op codes for `vault.relayAuth(method, ...)` (docs/relay-auth-design.md). */
+export declare const RelayMethod: { readonly Push: 1; readonly List: 2; readonly Get: 3; readonly Subscribe: 4 };
+
 /** The blind-relay transport contract (freehold-sync-design §10). Any transport — in-memory, HTTP,
  *  P2P — implements exactly these three methods over an opaque `syncId` bucket of sealed blobs. The
- *  relay never sees keys or plaintext. Auth (when a transport needs it) lives inside the concrete
- *  implementation, not this interface (see the freehold-relay-auth design). */
+ *  relay never sees keys or plaintext. `sync()` passes an optional per-op `auth` that a network relay
+ *  enforces and an in-process relay ignores (docs/relay-auth-design.md). */
 export interface BlindRelay {
   /** Append a sealed blob; resolves to its arrival index (seq). */
-  put(syncId: Uint8Array, sealed: Uint8Array): Promise<number>;
+  put(syncId: Uint8Array, sealed: Uint8Array, auth?: RelayAuth): Promise<number>;
   /** Count of blobs at seq ≥ `since` (how many are new for a client with that cursor). */
-  list(syncId: Uint8Array, since: number): Promise<number>;
+  list(syncId: Uint8Array, since: number, auth?: RelayAuth): Promise<number>;
   /** Fetch one sealed blob by arrival index, or null if out of range. */
-  get(syncId: Uint8Array, seq: number): Promise<Uint8Array | null>;
+  get(syncId: Uint8Array, seq: number, auth?: RelayAuth): Promise<Uint8Array | null>;
 }
 
 /** Outcome of a sync() pass. */
@@ -172,6 +183,15 @@ export declare class FreeholdVault {
   /** Server-blind, epoch-ordered replication over a BlindRelay: pull + reconcile (fast-forward /
    *  stale / fork) + apply winners + preserve fork losers + push. Requires an open session. */
   sync(options: { relay: BlindRelay; push?: boolean }): Promise<SyncReport>;
+
+  /** The opaque 16-byte relay bucket id for `dbUuid` (default the vault's sync bucket) — a commitment
+   *  to the DEK-derived relay-auth key, safe to hand to a relay. Requires an open session. */
+  syncId(dbUuid?: Uint8Array): Promise<Uint8Array>;
+
+  /** Sign a blind-relay op for `dbUuid`'s bucket with the DEK-derived relay-auth key, for advanced
+   *  callers driving a BlindRelay directly (docs/relay-auth-design.md). `method` is a RelayMethod code;
+   *  `arg` binds a Push to its blob bytes (empty for reads). sync() does this internally. */
+  relayAuth(method: number, arg?: Uint8Array, dbUuid?: Uint8Array): Promise<RelayAuth>;
 
   /** Register a fork listener (concurrent offline edits detected). Returns an unsubscribe fn. */
   onFork(cb: (fork: { id: string; winner: 'local' | 'incoming' }) => void): () => void;
