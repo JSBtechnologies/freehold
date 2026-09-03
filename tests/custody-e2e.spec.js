@@ -55,6 +55,13 @@ test('custody: own the data, apps are custodians (grant · tiers · revoke)', as
   await page.click('#consent-approve');
   await expect(page.locator('#tasks-status')).toHaveText('granted');
 
+  // D-DC3 — the grant is counterparty-verifiable: verify Tasks' signed token with ONLY the vault's
+  // pinned public key (no DEK, no broker), and prove a tampered token is rejected.
+  const gv = await page.evaluate(() => window.__custody.verifyGrant('Tasks', { scope: 'profile.read' }));
+  expect(gv.ok).toBe(true);
+  const gvTamper = await page.evaluate(() => window.__custody.verifyGrant('Tasks', { tamper: true }));
+  expect(gvTamper.ok).toBe(false);
+
   // tier 2 — attestation: the app gets a yes/no; DOB never leaves the vault.
   await page.click('#tasks-over18');
   await expect(page.locator('#tasks-out')).toContainText('verified');

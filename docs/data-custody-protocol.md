@@ -213,8 +213,13 @@ the split *tangible* (directly answering "how does the split work IRL?"):
 
 ## 11. Build order
 1. **Design sign-off** (this note).
-2. **Local broker + symmetric grants + ledger** (D-DC1/D-DC3/D-DC4 Local plane) — pure Freehold DB, no
-   new backend. → the §9 showcase.
+2. **Local broker + grants + ledger** (D-DC1/D-DC3/D-DC4 Local plane) — pure Freehold DB, no new
+   backend. → the §9 showcase. Grants are now **counterparty-verifiable** (D-DC3, ✅ 2026-09-02,
+   [[grant-token]] / `docs/grant-token-design.md`): the vault signs the grant claims with its Ed25519
+   identity key (proto `Grant.proof` = the signature, upgraded from the DEK-MAC placeholder), so an app
+   or downstream processor verifies a grant against the vault's pinned public key with no DEK and no
+   broker — bound by audience to the verified `app_id` (D-DC2). Reference + tamper-rejection E2E in the
+   custody demo; showcase adoption is isolated follow-up.
 3. **`.proto` contract** for `DataRequest`/`Grant`/`Attestation`/`Disclosure` (D-DC5) — even before a
    server, to freeze the SDK surface.
 4. **Real blind relay over Connect** (Sync plane) — finishes Freehold Sync's missing transport; unary

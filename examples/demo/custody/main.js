@@ -6,6 +6,7 @@ import { FreeholdVault } from '../../../packages/db/index.js';
 import { CustodyBroker } from './broker.js';
 import { AppClient } from './app-client.js';
 import { generateAppIdentity, signChallenge, _unb64 } from './app-identity.js';
+import { verifyGrantToken } from './grant-token.js';
 
 const $ = (id) => document.getElementById(id);
 function log(msg) {
@@ -149,6 +150,17 @@ async function setupBrokerAndApps() {
       });
     },
     tasksGrantId: () => apps.Tasks && apps.Tasks.client.grantId,
+    // D-DC3: verify an app's grant TOKEN as a counterparty would — with ONLY the vault's pinned public
+    // key + the pure verify, no DEK, no broker. `{ tamper }` mutates a field to prove tamper-evidence.
+    async verifyGrant(appName, opts = {}) {
+      const c = apps[appName].client;
+      let token = c.grantToken;
+      if (opts.tamper && token) token = { ...token, scopes: [...(token.scopes || []), 'profile.borrow'] };
+      const vaultPublicKey = await vault.vaultPublicKey();
+      return verifyGrantToken(
+        { verifyAttestation: (att, expect) => vault.verifyAttestation(att, expect), vaultPublicKey },
+        token, { scope: opts.scope });
+    },
   };
 }
 

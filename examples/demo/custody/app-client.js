@@ -20,6 +20,7 @@ export class AppClient {
   grantId = null;
   scopes = [];
   appId = null;
+  grantToken = null; // D-DC3: the vault-signed, counterparty-verifiable token for this grant
 
   constructor(port, identity) {
     this.#port = port;
@@ -59,7 +60,7 @@ export class AppClient {
   async request(scopes, purpose) {
     await this.#readyP;
     const m = await this.#send({ t: 'request', scopes, purpose });
-    if (m.t === 'grant') { this.grantId = m.grantId; this.scopes = m.scopes; return true; }
+    if (m.t === 'grant') { this.grantId = m.grantId; this.scopes = m.scopes; this.grantToken = m.token || null; return true; }
     return false;
   }
 

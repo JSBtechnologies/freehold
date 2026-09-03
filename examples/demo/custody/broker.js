@@ -15,6 +15,7 @@
 // Per-app SEPARATE files (app:<id>) is the production form — the broker enforcement is identical
 // either way (it mediates every query; apps never hold a key or send SQL). See protocol §7.
 import { verifyHello, randomChallenge, _b64 } from './app-identity.js';
+import { issueGrantToken } from './grant-token.js';
 
 const CONTROL_DB = 'vault';     // grants + ledger + per-app tables (notes, tasks)
 const PROFILE_DB = 'profile';   // the user's shared PII (owned; apps only ever get scoped views)
@@ -105,9 +106,15 @@ export class CustodyBroker {
     if (m.t === 'request') {
       const approved = await this.onConsent({ appId, name: appName, scopes: m.scopes || [], purpose: m.purpose || '' });
       if (!approved) { port.postMessage({ t: 'denied', rid: m.rid }); return; }
-      const grantId = await this.#recordGrant(appId, m.scopes || [], m.purpose || '');
+      const scopes = m.scopes || [];
+      const grantId = await this.#recordGrant(appId, scopes, m.purpose || '');
+      // D-DC3: also mint a counterparty-verifiable token — the vault SIGNS the grant claims, so the app
+      // (or a downstream processor) can prove the grant against the vault's public key with no broker.
+      // The token's tier summarizes the grant as its most-privileged capability.
+      const tier = Math.max(1, ...scopes.map((s) => (this.caps[s] ? this.caps[s].tier : 1)));
+      const token = await issueGrantToken(this.#vault, { grantId, appId, tier, scopes, purpose: m.purpose || '' });
       this.onChange();
-      port.postMessage({ t: 'grant', rid: m.rid, grantId, scopes: m.scopes || [] });
+      port.postMessage({ t: 'grant', rid: m.rid, grantId, scopes, token });
     } else if (m.t === 'call') {
       try {
         const data = await this.#fulfill(appId, m.grantId, m.cap, m.args || {});

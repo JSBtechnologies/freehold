@@ -28,6 +28,15 @@ audit and a real cross-browser/device pass**, not on feature completeness. Until
   builds).
 
 ### Added
+- **Counterparty-verifiable grant tokens (D-DC3)**: a grant is no longer only a broker-local id — the
+  vault now **signs** the grant claims with its Ed25519 identity key, so any counterparty (the app, a
+  downstream processor) can verify the grant against the vault's **pinned public key** with no DEK and
+  no broker round-trip. The token is the custody-v1 proto `Grant` (`claims` = a canonical
+  `freehold-grant-v1` claim over grantId/appId/tier/sorted-scopes/purpose/validity, `proof` = the
+  signature), bound by audience to the verified `app_id` (D-DC2). Verification recomputes the claim from
+  the presented fields (so a signature can't be re-paired with different claims) and pins the vault key.
+  Reuses the audited attestation primitive — no new crypto. Reference + E2E in the custody demo (a
+  tampered token is rejected); `docs/grant-token-design.md`.
 - **Requester authentication (Disclosure-plane app identity, D-DC2)**: custody apps now authenticate
   with a cryptographic identity instead of a phishable origin/name. Each app holds a WebCrypto Ed25519
   keypair and its `app_id` is a **commitment** to its public key
