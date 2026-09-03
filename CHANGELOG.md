@@ -28,6 +28,16 @@ audit and a real cross-browser/device pass**, not on feature completeness. Until
   builds).
 
 ### Added
+- **Requester authentication (Disclosure-plane app identity, D-DC2)**: custody apps now authenticate
+  with a cryptographic identity instead of a phishable origin/name. Each app holds a WebCrypto Ed25519
+  keypair and its `app_id` is a **commitment** to its public key
+  (`app_id = "app_" + base64url(SHA-256("freehold-app-id-v1" ‖ pubkey))[..12]`). The broker verifies a
+  challenge-response handshake on connect — `app_id == H(pubkey)` ∧ Ed25519 signature over its
+  challenge — and binds the port to the **verified** id; it never trusts a self-asserted id in a later
+  message. A lookalike app cannot claim a trusted app's id (it can't produce the committed key) or spoof
+  it in the consent prompt. Same commitment discipline as relay-auth (D-RA1), on the Disclosure plane.
+  Reference implementation + E2E in the custody demo (an impersonation attempt is rejected);
+  `docs/requester-auth-design.md`.
 - **Relay authentication (blind-relay access control)**: the blind relay now authorizes every op
   without ever seeing the DEK (`docs/relay-auth-design.md`, D-RA1). Each database has a DEK-derived
   Ed25519 relay-auth key (`HKDF(DEK, "…relay-auth-v1" ‖ db_uuid)`), and `sync_id` is now **bound** to

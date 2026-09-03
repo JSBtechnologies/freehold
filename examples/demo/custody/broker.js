@@ -14,6 +14,8 @@
 // showcase keeps to two files: `vault` (control plane + per-app tables) and `profile` (shared PII).
 // Per-app SEPARATE files (app:<id>) is the production form — the broker enforcement is identical
 // either way (it mediates every query; apps never hold a key or send SQL). See protocol §7.
+import { verifyHello, randomChallenge, _b64 } from './app-identity.js';
+
 const CONTROL_DB = 'vault';     // grants + ledger + per-app tables (notes, tasks)
 const PROFILE_DB = 'profile';   // the user's shared PII (owned; apps only ever get scoped views)
 
@@ -73,17 +75,35 @@ export class CustodyBroker {
     await this.#vault.sql('CREATE TABLE IF NOT EXISTS tasks(id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, done INTEGER DEFAULT 0)', [], CONTROL_DB);
   }
 
-  // Attach the broker to an app's MessagePort. The app half never sees anything but this port.
-  connect(port, appId) {
-    this.#ports.set(appId, port);
-    port.onmessage = (e) => this.#onMessage(appId, port, e.data);
+  // Attach the broker to an app's MessagePort. The app half never sees anything but this port. The app
+  // must AUTHENTICATE first (D-DC2): the broker issues a challenge, the app returns a signed manifest,
+  // and the broker binds this port to the VERIFIED app_id (app_id == H(pubkey) ∧ signature) — it never
+  // trusts a self-asserted id in a later message. Until authenticated, request/call are ignored.
+  connect(port) {
+    let appId = null, appName = null;
+    const challenge = randomChallenge();
+    port.onmessage = async (e) => {
+      const m = e.data;
+      if (!m || typeof m !== 'object') return;
+      if (!appId) {
+        if (m.t !== 'hello') return; // must authenticate before anything else
+        const verified = await verifyHello(m, challenge);
+        if (!verified) { port.postMessage({ t: 'authfail' }); return; }
+        appId = verified; appName = String(m.manifest.name || verified);
+        this.#ports.set(appId, port);
+        port.postMessage({ t: 'ready', appId, name: appName });
+        return;
+      }
+      await this.#onMessage(appId, appName, port, m);
+    };
+    port.postMessage({ t: 'challenge', challenge: _b64(challenge) });
     port.start && port.start();
   }
 
-  async #onMessage(appId, port, m) {
+  async #onMessage(appId, appName, port, m) {
     if (!m || typeof m !== 'object') return;
     if (m.t === 'request') {
-      const approved = await this.onConsent({ appId, scopes: m.scopes || [], purpose: m.purpose || '' });
+      const approved = await this.onConsent({ appId, name: appName, scopes: m.scopes || [], purpose: m.purpose || '' });
       if (!approved) { port.postMessage({ t: 'denied', rid: m.rid }); return; }
       const grantId = await this.#recordGrant(appId, m.scopes || [], m.purpose || '');
       this.onChange();

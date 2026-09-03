@@ -90,6 +90,11 @@ test('custody: own the data, apps are custodians (grant · tiers · revoke)', as
   // Notes still works — revoking one app does not touch another's grant or the owner's data.
   await expect(page.locator('#notes-list')).toContainText('a note only I can read');
 
+  // Requester auth (D-DC2): a lookalike app that CLAIMS Notes' verified id but signs with a different
+  // key is rejected at the broker handshake — app_id is a commitment to the app's key, not a label.
+  const imp = await page.evaluate(() => window.__custody.impersonate('Notes'));
+  expect(imp.authed).toBe(false);
+
   expect(errors, 'no uncaught page errors').toEqual([]);
   await ctx.close();
 });

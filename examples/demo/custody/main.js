@@ -5,6 +5,7 @@
 import { FreeholdVault } from '../../../packages/db/index.js';
 import { CustodyBroker } from './broker.js';
 import { AppClient } from './app-client.js';
+import { generateAppIdentity, signChallenge, _unb64 } from './app-identity.js';
 
 const $ = (id) => document.getElementById(id);
 function log(msg) {
@@ -79,19 +80,26 @@ async function setupBrokerAndApps() {
   // grant in the vault's own sealed DB. (A per-grant re-assertion is a config option for higher-risk
   // scopes — see protocol §5.3.)
   broker.onConsent = (req) => new Promise((resolve) => {
+    // Show the self-asserted name AND the cryptographically verified app_id (D-DC2): the name is
+    // advisory, the app_id is what the grant is bound to and cannot be spoofed by a lookalike app.
     $('consent-text').innerHTML =
-      `<b>${req.appId}</b> requests: <code>${req.scopes.join('</code> <code>')}</code>` +
-      `<br>purpose: <i>${req.purpose || '—'}</i>`;
+      `<b>${escapeHtml(req.name || req.appId)}</b> <span class="muted">(verified <code>${escapeHtml(req.appId)}</code>)</span>` +
+      ` requests: <code>${req.scopes.map(escapeHtml).join('</code> <code>')}</code>` +
+      `<br>purpose: <i>${escapeHtml(req.purpose || '—')}</i>`;
     $('consent').classList.add('show');
     consentResolve = (ok) => { $('consent').classList.remove('show'); consentResolve = null; resolve(ok); };
   });
   broker.onChange = () => { renderLedger(); };
 
-  // Wire each app to the broker over its own MessageChannel (the app half holds only port2).
-  for (const id of ['Notes', 'Tasks']) {
+  // Wire each app to the broker over its own MessageChannel (the app half holds only port2). Each app
+  // has its own Ed25519 identity and authenticates to the broker before it can request anything.
+  for (const name of ['Notes', 'Tasks']) {
+    const identity = await generateAppIdentity(name);
     const ch = new MessageChannel();
-    broker.connect(ch.port1, id);
-    apps[id] = { client: new AppClient(ch.port2) };
+    broker.connect(ch.port1);
+    const client = new AppClient(ch.port2, identity);
+    apps[name] = { client, identity };
+    await client.ready(); // block until the broker verified this app's identity
   }
 
   await renderProfile();
@@ -108,13 +116,36 @@ async function setupBrokerAndApps() {
   const optedIn = new URLSearchParams(location.search).has('e2e');
   if (!(dev && optedIn)) return;
   window.__custody = {
-    brokerCall(appId, grantId, cap, args = {}) {
+    // Raw broker call bypassing the CONSENT prompt (the grant already exists) to prove a REVOKED grant
+    // is rejected at the broker. It still AUTHENTICATES as the real app (D-DC2) — signing with that
+    // app's identity — so the verified app_id matches the grant; only the revocation stops it.
+    async brokerCall(appName, grantId, cap, args = {}) {
+      const identity = apps[appName].identity;
+      const ch = new MessageChannel();
+      broker.connect(ch.port1);
+      const c = new AppClient(ch.port2, identity);
+      await c.ready();
+      c.grantId = grantId;
+      try { return { ok: true, data: await c.call(cap, args) }; }
+      catch (e) { return { ok: false, error: e && e.message ? e.message : String(e) }; }
+    },
+    // Prove impersonation is IMPOSSIBLE: a forged manifest that CLAIMS a victim app's id but signs with
+    // a different key is rejected, because app_id must equal H(pubkey). Resolves { authed:false }.
+    async impersonate(appName) {
+      const victimId = apps[appName].client.appId;
+      const forged = await generateAppIdentity('EvilTwin');
+      forged.appId = victimId;                                   // claim the victim's id...
+      forged.manifest = { ...forged.manifest, appId: victimId, name: appName }; // ...but keep our key
+      const ch = new MessageChannel();
+      broker.connect(ch.port1);
       return new Promise((resolve) => {
-        const ch = new MessageChannel();
-        broker.connect(ch.port1, appId);
-        ch.port2.onmessage = (e) => resolve(e.data);
+        ch.port2.onmessage = async (e) => {
+          const m = e.data;
+          if (m.t === 'challenge') ch.port2.postMessage({ t: 'hello', ...(await signChallenge(forged, _unb64(m.challenge))) });
+          else if (m.t === 'ready') resolve({ authed: true, appId: m.appId });
+          else if (m.t === 'authfail') resolve({ authed: false });
+        };
         ch.port2.start && ch.port2.start();
-        ch.port2.postMessage({ t: 'call', rid: 1, grantId, cap, args });
       });
     },
     tasksGrantId: () => apps.Tasks && apps.Tasks.client.grantId,
@@ -183,7 +214,7 @@ async function tasksPay() {
   tasksOut(`charged via ${r.processor} → receipt ${r.receipt}   (email released to the processor; the APP never received it — retainedByApp=${r.retainedByApp})`);
 }
 async function tasksRevoke() {
-  await broker.revokeApp('Tasks');
+  await broker.revokeApp(apps.Tasks.client.appId);
   apps.Tasks.client.grantId = null;
   $('tasks-status').textContent = 'revoked'; $('tasks-status').className = 'pill bad';
   setAppEnabled('Tasks', false);

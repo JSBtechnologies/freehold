@@ -228,9 +228,14 @@ the split *tangible* (directly answering "how does the split work IRL?"):
    statelessly (`sync_id == H(pubkey)` ∧ Ed25519 sig over a domain-separated op message) — no
    trust-on-first-use / land-grab — plus a per-key rate limit. Blindness ≠ authorization, now closed
    for the Sync plane; the DEK never reaches the relay, and no new crypto (audited Ed25519/HKDF as-is).
-5. **Manifest / app-key requester auth** (D-DC2) before opening to untrusted apps — the next item;
-   this authorizes the *Disclosure* plane (third-party apps), distinct from the Sync-plane relay auth
-   above (a vault talking to its own buckets).
+5. **Manifest / app-key requester auth** (D-DC2) before opening to untrusted apps — ✅ **DONE
+   (reference) 2026-09-02** ([[requester-auth]] / `docs/requester-auth-design.md`): apps authenticate
+   with a WebCrypto Ed25519 key whose `app_id` is a **commitment** to the public key
+   (`app_id = "app_" + base64url(SHA-256("freehold-app-id-v1" ‖ pubkey))[..12]`); the broker verifies a
+   challenge-response on connect (`app_id == H(pubkey)` ∧ signature) and binds the port to the verified
+   id — a lookalike can't claim a trusted app's id or spoof the consent prompt. Same commitment
+   discipline as Sync-plane relay auth (D-RA1). Reference + impersonation-rejection E2E in the custody
+   demo; the Quasar showcase adopts the identical handshake as isolated UI follow-up.
 6. **Ed25519 vault signing keys (#7)** → verifiable tier-2 attestations light up (D-DC3), no protocol
    change above §6. ✅ **DONE 2026-09-01** ([[vault-signing]]).
 
