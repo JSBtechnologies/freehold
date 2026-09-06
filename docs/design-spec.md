@@ -10,21 +10,22 @@ kind: security-critical-design
 reviewed-by: adversarial-review.md (crypto-construction / crash-consistency / plaintext-leak)
 ---
 
-# Encrypting VFS — design spec (design-before-code)
+# Encrypting VFS — design specification
 
-> **⚠ READ §17 FIRST.** This spec went through a 3-agent adversarial review (see
-> `adversarial-review.md`). The review found the crypto core sound but the surrounding machinery
-> under-specified/unsafe. **§17 is the normative v1.1 revision delta and SUPERSEDES any conflicting
-> text in §1–§16.** Where §1–§16 and §17 disagree, §17 wins. Key reversal: **v1 journal mode is now
-> rollback-journal, not WAL** (WAL caused committed-data corruption via the block device).
-
-> **What this is.** The reviewed-before-coded design for the moat artifact: a header-free,
-> whole-file-encrypted SQLite storage layer built as our own VFS. Security-critical. Not yet
-> implemented. All design decisions are resolved (§15); §17 hardens them post-review.
+> **What this is.** A header-free, whole-file-encrypted SQLite storage layer implemented as a custom
+> VFS: every file SQLite touches (main DB, rollback journal, temp) is encrypted below SQLite with
+> per-DB subkeys, on OPFS SAHPool storage — no format headers, no cross-origin-isolation requirement.
+> This is the security-critical core, **built and security-reviewed** (milestones M1–M3; see
+> `security-review.md` and `adversarial-review.md`).
+>
+> **§17 is the normative guarantee ledger** — the itemized list of what the implementation guarantees
+> and how it is enforced. §1–§16 give the construction and the rationale behind each decision; where a
+> choice was tightened during adversarial review (for example, v1 uses a rollback journal, not WAL, so
+> the block device never corrupts committed data), §17 records the resolved, authoritative behavior.
 
 ---
 
-## 0. What changed from the topic's initial sketch (read before the rest)
+## 0. Why XChaCha20-Poly1305 and a header-free block device
 
 The topic README's design surface assumed **AES-256-GCM in reserved bytes, SQLCipher-style**.
 Two facts surfaced during design change that starting point. Both are load-bearing:
@@ -478,7 +479,7 @@ false.
 
 ---
 
-## 17. v1.1 revision delta (NORMATIVE — supersedes §1–§16 on conflict)
+## 17. Normative guarantee ledger (v1.1)
 
 Outcome of the 2026-08-28 3-agent adversarial review (`adversarial-review.md`). The crypto core
 (XChaCha20-Poly1305 + fresh random 192-bit nonce, offset-translated block device, VFS-layer

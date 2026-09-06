@@ -9,7 +9,7 @@ kind: security-critical-design
 depends-on: envelope v3 (issue #3, shipped) — env_generation + DEK-keyed MAC + SDK floor
 ---
 
-# DEK rotation + re-encryption — design (v0.1, design-before-code)
+# DEK rotation + re-encryption
 
 > Turns "revoke a method" (drop one KEK slot; DEK unchanged) into **true eviction of a device that
 > already saw the key**, by rotating the DEK and re-encrypting every block under it. This is the

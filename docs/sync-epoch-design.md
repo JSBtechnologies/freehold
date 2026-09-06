@@ -9,7 +9,7 @@ kind: security-critical-design
 depends-on-finding: cross-device passkey-PRF unlock CONFIRMED (Chrome+Google, Win→Mac, localhost, 2026-08-28)
 ---
 
-# Sync-epoch anchor — design (v0.1, design-before-code)
+# Sync-epoch anchor
 
 > Upgrades the VFS's rollback **detection** (M2 local anchor) into rollback **prevention that can't
 > propagate**, using the peer channel we just proved works. Builds directly on

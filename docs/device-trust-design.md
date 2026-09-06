@@ -1,6 +1,6 @@
 ---
 title: Freehold device trust — identity, pairing, continuous auth, federation & threshold custody
-status: HARDENED — build-ready for increments 1–2b (design-before-code; hardened via adversarial review)
+status: Increment 1 (device identity + certs) implemented and reviewed; increments 2-6 (pairing, revocation, federation, threshold recovery) designed and staged. Hardened via 6-lens adversarial review.
 depends-on: relay-auth-design.md (D-RA1 bucket auth), requester-auth-design.md (D-DC2 app identity),
   grant-token-design.md (D-DC3 signed-claim shape reused for certs), vault-signing-design.md
   (D-VS1 vault identity; D-VS2 the independent trust key this doc adopts as the device-cert root),

@@ -10,7 +10,7 @@ depends-on: Freehold DB crypto core (HKDF-off-DEK subkeys — crypto.rs; shipped
   §6/D-DC3 (swappable grant/attestation proof); this is the "#7" gate that lights up verifiable tier-2.
 ---
 
-# Freehold — vault signing key & verifiable tier-2 attestations (design-before-code)
+# Freehold vault signing key & verifiable tier-2 attestations
 
 > Today a tier-2 attestation ("18+ ✓", "card valid") is a bare fact the vault's *own* broker returns —
 > the relying app must **trust the broker's word** (data-custody-protocol §6: symmetric/trust-local

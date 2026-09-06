@@ -2,13 +2,13 @@
 slug: freehold-data-custody
 artifact: data-custody-protocol
 version: 0.1
-status: DRAFT 2026-09-01 — design-before-code. Records the model + decisions D-DC1..6; awaiting sign-off before any build. Not yet implemented.
+status: v0.1 — the custody model + decisions D-DC1..6. Requester auth (D-DC2), grant tokens (D-DC3), and tier-2 attestations are implemented (reference + E2E in the custody demo); disclosure currently runs on the Local-plane broker.
 created: 2026-09-01
 kind: protocol-design
 depends-on: Freehold DB (envelope v3, per-DB HKDF subkeys, DEK rotation/eviction — shipped); Freehold Sync (version-vector engine over a blind relay — engine shipped; real Connect transport shipped 2026-09-02, see [[transport]]); per-device SIGNING keys (#7 / sync-epoch §D-SE2 — NOT yet built; gates verifiable attestations)
 ---
 
-# Freehold — data-custody protocol (v0.1, design-before-code)
+# Freehold data-custody protocol
 
 > Inverts the app↔data relationship. Instead of an app holding your data on its servers (it owns it;
 > you lease access), the data lives in a **Freehold vault on your own device**, sealed under your
