@@ -4,11 +4,13 @@
   "type": "module",
   "description": "Freehold public site + demos: landing (/), docs (/docs.html), passkey and data-custody demos, and the VFS self-test (/selftest.html), served over the prebuilt wasm in ./pkg.",
   "scripts": {
+    "predev": "node build-docs.mjs",
     "dev": "vite",
-    "build": "vite build && node copy-dist-pkg.mjs",
+    "build": "node build-docs.mjs && vite build && node copy-dist-pkg.mjs",
     "preview": "vite preview"
   },
   "devDependencies": {
+    "marked": "^18.0.11",
     "vite": "^5.4.0"
   }
 }

@@ -1,4 +1,4 @@
-// Freehold site — shared chrome, fully self-contained. Injects a consistent top nav (with its OWN
+// Freehold site - shared chrome, fully self-contained. Injects a consistent top nav (with its OWN
 // scoped styles, so it can drop onto the functional demo pages without touching their CSS) plus a
 // scroll-reveal observer. Include with:
 //   <script type="module" src="./site-nav.js" data-page="demos"></script>

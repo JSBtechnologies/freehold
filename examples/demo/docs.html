@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Freehold — documentation</title>
-<meta name="description" content="Freehold documentation: the design-first map of the encrypting database, server-blind sync, data custody, and device trust." />
+<title>Freehold - documentation</title>
+<meta name="description" content="Freehold documentation: the encrypting database, server-blind sync, data custody, and device trust - rendered in full, with search." />
 <link rel="stylesheet" href="./site.css" />
 </head>
 <body>
@@ -21,154 +21,40 @@
     </a>
     <div class="nav-links">
       <a href="./index.html">Home</a>
-      <a href="#core">Database</a>
-      <a href="#custody">Custody</a>
-      <a href="#security">Security</a>
+      <a href="./passkey.html">Passkey</a>
+      <a href="./custody.html">Custody</a>
+      <a href="./docs.html" style="color:var(--ink)">Docs</a>
       <a class="ghost-mobile" href="https://github.com/JSBtechnologies/freehold" target="_blank" rel="noopener">GitHub ↗</a>
       <a class="cta" href="./passkey.html">Try it</a>
     </div>
   </div>
 </nav>
 
-<header class="hero" style="padding:72px 0 40px">
-  <div class="wrap">
-    <span class="eyebrow"><span class="dot"></span> design-first · every decision specified, reviewed, then built</span>
-    <h1 class="hero-title" style="font-size:clamp(34px,5vw,52px)">Documentation</h1>
-    <p class="hero-sub">
-      Every part of the security model is written down before it's built. This is the map — grouped by
-      plane, with the stable decision IDs (<code style="font-family:var(--font-mono);color:var(--brass-2)">D-RA1</code>,
-      <code style="font-family:var(--font-mono);color:var(--brass-2)">D-DT1</code>…) the code and commits reference back to.
-    </p>
-    <div class="cta-row">
-      <a class="btn btn-ghost" href="https://github.com/JSBtechnologies/freehold/tree/main/docs" target="_blank" rel="noopener">All docs on GitHub ↗</a>
-      <a class="btn btn-ghost" href="https://github.com/JSBtechnologies/freehold#readme" target="_blank" rel="noopener">README</a>
+<div class="docs-shell">
+  <!-- sidebar: search + grouped nav -->
+  <aside class="docs-side">
+    <div class="docs-search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      <input id="q" type="search" placeholder="Search the docs…" autocomplete="off" spellcheck="false" aria-label="Search the documentation" />
+      <kbd>/</kbd>
+      <div id="results" class="docs-results" hidden></div>
     </div>
-  </div>
-</header>
+    <nav id="docnav" class="docs-nav" aria-label="Documentation"></nav>
+  </aside>
 
-<main class="wrap" style="padding-bottom:20px">
-
-  <!-- new here -->
-  <div class="note reveal" style="margin:8px 0 44px">
-    <b>New here?</b> Read <a href="https://github.com/JSBtechnologies/freehold/blob/main/docs/design-spec.md" target="_blank" rel="noopener">design-spec</a>
-    for the database core, then <a href="https://github.com/JSBtechnologies/freehold/blob/main/docs/data-custody-protocol.md" target="_blank" rel="noopener">data-custody-protocol</a>
-    for where the project is headed. Evaluating the crypto? Start with
-    <a href="https://github.com/JSBtechnologies/freehold/blob/main/docs/audit-readiness.md" target="_blank" rel="noopener">audit-readiness</a>.
-  </div>
-
-  <!-- core -->
-  <section id="core" style="margin-bottom:48px">
-    <p class="kicker">Core database</p>
-    <h2 class="section-title" style="font-size:26px">The encrypted engine</h2>
-    <p class="section-lead" style="margin-bottom:24px">Passkey-unlocked, end-to-end-encrypted SQLite.</p>
-    <div class="doclist">
-      <a class="docitem reveal" href="https://github.com/JSBtechnologies/freehold/blob/main/docs/design-spec.md" target="_blank" rel="noopener">
-        <span class="code-id">design-spec</span><span class="t"><b>The VFS &amp; envelope spec</b><span>The encrypting VFS, key envelope, and the normative §17 guarantee list (v1.1).</span></span></a>
-      <a class="docitem reveal" href="https://github.com/JSBtechnologies/freehold/blob/main/docs/bundle-format.md" target="_blank" rel="noopener">
-        <span class="code-id">bundle-format</span><span class="t"><b>The <code>.freehold</code> bundle</b><span>Server-blind portability format: envelope + encrypted image, no key inside.</span></span></a>
-      <a class="docitem reveal" href="https://github.com/JSBtechnologies/freehold/blob/main/docs/dek-rotation-design.md" target="_blank" rel="noopener">
-        <span class="code-id">dek-rotation</span><span class="t"><b>DEK rotation</b><span>Physical re-encryption under a fresh key, crash-safe behind a two-store commit barrier — true device eviction.</span></span></a>
-      <a class="docitem reveal" href="https://github.com/JSBtechnologies/freehold/blob/main/docs/convenience-tier-design.md" target="_blank" rel="noopener">
-        <span class="code-id">convenience-tier</span><span class="t"><b>Device-key auto-unlock</b><span>Opt-in zero-friction tier; a device slot stripped from exports.</span></span></a>
+  <!-- rendered doc -->
+  <main class="docs-main">
+    <article id="doc" class="prose"></article>
+    <div class="docs-foot">
+      Something unclear or wrong? <a href="https://github.com/JSBtechnologies/freehold/tree/main/docs" target="_blank" rel="noopener">Edit these docs on GitHub ↗</a>
+      · <a href="./index.html">Back to home</a>
     </div>
-  </section>
+  </main>
 
-  <!-- sync -->
-  <section id="sync" style="margin-bottom:48px">
-    <p class="kicker">Sync &amp; transport</p>
-    <h2 class="section-title" style="font-size:26px">Server-blind synchronization</h2>
-    <p class="section-lead" style="margin-bottom:24px">A relay that moves sealed blobs and never sees a key.</p>
-    <div class="doclist">
-      <a class="docitem reveal" href="https://github.com/JSBtechnologies/freehold/blob/main/docs/sync-epoch-design.md" target="_blank" rel="noopener">
-        <span class="code-id">sync-epoch</span><span class="t"><b>Peer-attested anti-rollback</b><span>Freshness that survives a dishonest provider — detectable, non-propagating staleness.</span></span></a>
-      <a class="docitem reveal" href="https://github.com/JSBtechnologies/freehold/blob/main/docs/transport-design.md" target="_blank" rel="noopener">
-        <span class="code-id">transport</span><span class="t"><b>The relay contract</b><span>The frozen <code>.proto</code> and the topology-vs-transport axes (Connect at the edge, gRPC relay↔relay, WebRTC direct).</span></span></a>
-      <a class="docitem reveal" href="https://github.com/JSBtechnologies/freehold/blob/main/docs/relay-auth-design.md" target="_blank" rel="noopener">
-        <span class="code-id">D-RA1</span><span class="t"><b>Blind-relay authorization</b><span>Stateless: <code>sync_id</code> is a commitment to a DEK-derived key. No land-grab, no trust-on-first-use.</span></span></a>
-    </div>
-  </section>
+  <!-- per-doc table of contents -->
+  <aside class="docs-toc"><nav id="toc" aria-label="On this page"></nav></aside>
+</div>
 
-  <!-- custody -->
-  <section id="custody" style="margin-bottom:48px">
-    <p class="kicker">Data custody</p>
-    <h2 class="section-title" style="font-size:26px">You own it; apps are custodians</h2>
-    <p class="section-lead" style="margin-bottom:24px">Apps request scoped disclosures — they don't hold your data.</p>
-    <div class="doclist">
-      <a class="docitem reveal" href="https://github.com/JSBtechnologies/freehold/blob/main/docs/data-custody-protocol.md" target="_blank" rel="noopener">
-        <span class="code-id">protocol</span><span class="t"><b>The custody model</b><span>Owner-held data, tiered disclosure (custodian / attestation / borrow), the Local / Sync / Disclosure planes.</span></span></a>
-      <a class="docitem reveal" href="https://github.com/JSBtechnologies/freehold/blob/main/docs/vault-signing-design.md" target="_blank" rel="noopener">
-        <span class="code-id">vault-signing</span><span class="t"><b>Verifiable attestations</b><span>The vault Ed25519 identity signs "18+ ✓" — a fact proven with no PII on the wire.</span></span></a>
-      <a class="docitem reveal" href="https://github.com/JSBtechnologies/freehold/blob/main/docs/requester-auth-design.md" target="_blank" rel="noopener">
-        <span class="code-id">D-DC2</span><span class="t"><b>Requester authentication</b><span>Apps authenticate with a key-committed <code>app_id</code>, not a phishable origin or name.</span></span></a>
-      <a class="docitem reveal" href="https://github.com/JSBtechnologies/freehold/blob/main/docs/grant-token-design.md" target="_blank" rel="noopener">
-        <span class="code-id">D-DC3</span><span class="t"><b>Counterparty-verifiable grants</b><span>The vault signs the grant claim; anyone verifies it against the pinned public key.</span></span></a>
-    </div>
-  </section>
-
-  <!-- device trust -->
-  <section id="device" style="margin-bottom:48px">
-    <p class="kicker">Device trust</p>
-    <h2 class="section-title" style="font-size:26px">Per-device identity</h2>
-    <p class="section-lead" style="margin-bottom:24px">For the multi-device, peer-to-peer, self-hosted-relay world.</p>
-    <div class="doclist">
-      <a class="docitem reveal" href="https://github.com/JSBtechnologies/freehold/blob/main/docs/device-trust-design.md" target="_blank" rel="noopener">
-        <span class="code-id">D-DT1…6</span><span class="t"><b>Device trust</b><span>Device certificates chaining to an independent vault trust key, QR pairing, continuous auth, two-tier revocation, federated relays, threshold recovery. Increment 1 (identity + certs) is built; the rest is staged.</span></span></a>
-    </div>
-  </section>
-
-  <!-- security -->
-  <section id="security" style="margin-bottom:36px">
-    <p class="kicker">Security &amp; assurance</p>
-    <h2 class="section-title" style="font-size:26px">Reviewed, and honest about limits</h2>
-    <p class="section-lead" style="margin-bottom:24px">The reviewer's entry points.</p>
-    <div class="doclist">
-      <a class="docitem reveal" href="https://github.com/JSBtechnologies/freehold/blob/main/docs/audit-readiness.md" target="_blank" rel="noopener">
-        <span class="code-id">audit</span><span class="t"><b>Audit readiness</b><span>The full threat model, invariant ledger, and design→code map — start here to review the crypto.</span></span></a>
-      <a class="docitem reveal" href="https://github.com/JSBtechnologies/freehold/blob/main/docs/BUILD-NOTES.md" target="_blank" rel="noopener">
-        <span class="code-id">guarantees</span><span class="t"><b>The honest ledger</b><span>What is proven, what is a backstop, what is out of scope.</span></span></a>
-      <a class="docitem reveal" href="https://github.com/JSBtechnologies/freehold/blob/main/docs/supply-chain.md" target="_blank" rel="noopener">
-        <span class="code-id">supply-chain</span><span class="t"><b>Dependency inventory</b><span>The "audited primitives, used as-is" discipline, itemized.</span></span></a>
-      <a class="docitem reveal" href="https://github.com/JSBtechnologies/freehold/blob/main/SECURITY.md" target="_blank" rel="noopener">
-        <span class="code-id">policy</span><span class="t"><b>Security policy</b><span>Reporting a vulnerability, the security-model summary, and supported versions.</span></span></a>
-    </div>
-  </section>
-
-  <!-- conventions -->
-  <section class="prose reveal" style="border-top:1px solid var(--line);padding-top:32px;margin-bottom:20px">
-    <h2>Conventions</h2>
-    <ul>
-      <li><b>No invented crypto.</b> Only audited RustCrypto / dalek and WebCrypto primitives, used as-is.</li>
-      <li><b>Design before code.</b> Anything touching the security model gets a design doc and sign-off first; the doc's decision IDs are load-bearing references in the code.</li>
-      <li><b>Honest limits.</b> Every doc states what it does <em>not</em> guarantee.</li>
-    </ul>
-  </section>
-</main>
-
-<footer class="site">
-  <div class="wrap">
-    <div class="cols">
-      <div>
-        <a class="brand" href="./index.html" style="margin-bottom:12px">
-          <svg class="mark" viewBox="0 0 32 32" fill="none" aria-hidden="true">
-            <rect x="2.5" y="2.5" width="27" height="27" rx="7" stroke="url(#fg)" stroke-width="2"/>
-            <path d="M11 22V10h9M11 16h6" stroke="url(#fg)" stroke-width="2.2" stroke-linecap="round"/>
-            <defs><linearGradient id="fg" x1="0" y1="0" x2="32" y2="32">
-              <stop stop-color="#f2c877"/><stop offset="1" stop-color="#7c9cff"/></linearGradient></defs>
-          </svg><span>Freehold</span>
-        </a>
-        <p class="lede">Passkey-unlocked, end-to-end-encrypted SQLite. Own your data outright.</p>
-      </div>
-      <div><h4>Product</h4>
-        <a href="./passkey.html">Passkey demo</a><a href="./custody.html">Custody demo</a><a href="./selftest.html">VFS self-test</a></div>
-      <div><h4>Docs</h4>
-        <a href="./docs.html">Overview</a><a href="https://github.com/JSBtechnologies/freehold/tree/main/docs" target="_blank" rel="noopener">Design docs</a></div>
-      <div><h4>Project</h4>
-        <a href="https://github.com/JSBtechnologies/freehold" target="_blank" rel="noopener">GitHub</a><a href="https://github.com/JSBtechnologies/freehold/blob/main/SECURITY.md" target="_blank" rel="noopener">Security</a></div>
-    </div>
-    <div class="fine">© Freehold · Licensed MIT OR Apache-2.0 · 0.x security preview — not yet externally audited.</div>
-  </div>
-</footer>
-
-<script type="module" src="./site-nav.js" data-page="docs"></script>
+<script type="module" src="./docs-app.js"></script>
 </body>
 </html>

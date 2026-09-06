@@ -1,4 +1,4 @@
-/* Freehold — public site design system (landing, docs, and shared demo chrome).
+/* Freehold - public site design system (landing, docs, and shared demo chrome).
    Dark-first, editorial-but-technical. No framework, no build step for the CSS itself. */
 
 :root {
@@ -16,7 +16,7 @@
   --dim:       #8b97b4;
   --faint:     #67728f;
 
-  /* Signal — brass/deed accent (ownership) + cool crypto accent */
+  /* Signal - brass/deed accent (ownership) + cool crypto accent */
   --brass:     #e8b559;
   --brass-2:   #f2c877;
   --azure:     #7c9cff;
@@ -241,3 +241,80 @@ footer.site .fine { margin-top: 34px; padding-top: 22px; border-top: 1px solid v
 .prose ul { margin: 0 0 16px; padding-left: 20px; } .prose li { margin: 6px 0; }
 .prose code { font-family: var(--font-mono); font-size: 13.5px; background: var(--panel-2); border: 1px solid var(--line);
   padding: 1px 6px; border-radius: 6px; color: var(--brass-2); }
+
+/* ================= docs app (docs.html) ================= */
+.docs-shell { max-width: 1320px; margin: 0 auto; display: grid;
+  grid-template-columns: 264px minmax(0,1fr) 210px; gap: 0; align-items: start; }
+.docs-side { position: sticky; top: 49px; height: calc(100vh - 49px); overflow-y: auto;
+  padding: 22px 16px 40px; border-right: 1px solid var(--line); }
+.docs-main { min-width: 0; padding: 30px 40px 80px; }
+.docs-toc { position: sticky; top: 49px; height: calc(100vh - 49px); overflow-y: auto; padding: 30px 16px; }
+
+/* search */
+.docs-search { position: relative; margin-bottom: 20px; }
+.docs-search > svg { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); width: 15px; height: 15px; color: var(--faint); pointer-events: none; }
+.docs-search input { width: 100%; font: 14px var(--font-sans); color: var(--ink); background: var(--panel);
+  border: 1px solid var(--line-2); border-radius: 10px; padding: 9px 30px 9px 33px; outline: none; }
+.docs-search input:focus { border-color: var(--azure); box-shadow: 0 0 0 3px rgba(124,156,255,.14); }
+.docs-search input::placeholder { color: var(--faint); }
+.docs-search kbd { position: absolute; right: 9px; top: 50%; transform: translateY(-50%); font: 11px var(--font-mono);
+  color: var(--faint); border: 1px solid var(--line-2); border-radius: 5px; padding: 1px 6px; background: var(--bg-2); }
+.docs-search input:focus ~ kbd { display: none; }
+.docs-results { position: absolute; z-index: 40; top: calc(100% + 8px); left: 0; right: -140px; max-height: 60vh; overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--line-2); border-radius: 12px; box-shadow: var(--shadow); padding: 6px; }
+.docs-results .res { display: block; padding: 9px 11px; border-radius: 8px; text-decoration: none; }
+.docs-results .res:hover, .docs-results .res.on { background: var(--panel-2); }
+.docs-results .res-group { display: block; font-family: var(--font-mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--brass); }
+.docs-results .res-title { display: block; color: var(--ink); font-size: 14px; font-weight: 600; margin: 1px 0; }
+.docs-results .res-snip { display: block; color: var(--dim); font-size: 12.5px; line-height: 1.5; }
+.docs-results mark { background: rgba(232,181,89,.24); color: var(--brass-2); border-radius: 3px; padding: 0 1px; }
+.docs-results .res-empty { padding: 12px; color: var(--dim); font-size: 13.5px; }
+
+/* sidebar nav */
+.docs-group { font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--faint); margin: 18px 0 6px; padding: 0 10px; }
+.docs-group:first-child { margin-top: 0; }
+.docs-links { display: flex; flex-direction: column; gap: 1px; margin-bottom: 4px; }
+.docs-link { color: var(--dim); font-size: 14px; text-decoration: none; padding: 6px 10px; border-radius: 8px; border-left: 2px solid transparent; }
+.docs-link:hover { color: var(--ink); background: var(--panel); }
+.docs-link.on { color: var(--ink); background: var(--panel); border-left-color: var(--brass); font-weight: 550; }
+
+/* toc */
+.toc-title { font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); margin-bottom: 10px; }
+.toc-link { display: block; color: var(--dim); font-size: 12.5px; text-decoration: none; padding: 4px 0 4px 10px; border-left: 1px solid var(--line); line-height: 1.4; }
+.toc-link:hover { color: var(--ink); border-left-color: var(--line-2); }
+.toc-link.lvl-3 { padding-left: 22px; font-size: 12px; }
+
+/* doc header + rich prose for rendered markdown */
+.doc-head { border-bottom: 1px solid var(--line); padding-bottom: 18px; margin-bottom: 8px; }
+.doc-head .doc-group { font-family: var(--font-mono); font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--brass); }
+.doc-head h1 { font-size: clamp(26px, 4vw, 34px); letter-spacing: -.02em; margin: 8px 0 0; color: var(--ink); line-height: 1.15; }
+.doc-head .doc-status { color: var(--dim); font-size: 13px; margin: 10px 0 0; font-family: var(--font-mono); }
+.docs-main .prose { max-width: 760px; }
+.docs-main .prose h1 { display: none; } /* title comes from doc-head */
+.docs-main .prose h2 { scroll-margin-top: 64px; padding-top: 6px; border-top: 1px solid var(--line); }
+.docs-main .prose h3 { scroll-margin-top: 64px; }
+.docs-main .prose a { color: var(--azure-2); text-decoration: none; border-bottom: 1px solid rgba(124,156,255,.25); }
+.docs-main .prose a:hover { color: #fff; border-bottom-color: var(--azure); }
+.docs-main .prose pre { background: #070a12; border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px;
+  overflow-x: auto; font-family: var(--font-mono); font-size: 13px; line-height: 1.65; color: #d6def2; margin: 0 0 16px; }
+.docs-main .prose pre code { background: none; border: none; padding: 0; color: inherit; font-size: 13px; }
+.docs-main .prose blockquote { border-left: 3px solid var(--brass); margin: 0 0 16px; padding: 4px 0 4px 16px; color: var(--dim); }
+.docs-main .prose blockquote p { margin: 4px 0; }
+.docs-main .prose table { width: 100%; border-collapse: collapse; margin: 0 0 20px; font-size: 14px; display: block; overflow-x: auto; }
+.docs-main .prose th, .docs-main .prose td { text-align: left; padding: 9px 12px; border: 1px solid var(--line); vertical-align: top; }
+.docs-main .prose th { background: var(--panel); color: var(--ink); font-weight: 600; font-size: 12.5px; }
+.docs-main .prose hr { border: none; border-top: 1px solid var(--line); margin: 30px 0; }
+.docs-main .prose strong { color: var(--ink); }
+.docs-foot { max-width: 760px; margin-top: 40px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--dim); font-size: 13.5px; }
+
+@media (max-width: 1080px) {
+  .docs-shell { grid-template-columns: 240px minmax(0,1fr); }
+  .docs-toc { display: none; }
+  .docs-results { right: 0; }
+}
+@media (max-width: 760px) {
+  .docs-shell { grid-template-columns: 1fr; }
+  .docs-side { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--line); }
+  .docs-main { padding: 22px; }
+}

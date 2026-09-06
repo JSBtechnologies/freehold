@@ -11,7 +11,7 @@ const dest = here + 'dist/pkg';
 try {
   await access(src);
 } catch {
-  console.error(`[build] wasm pkg not found at ${src} — build it first:\n` +
+  console.error(`[build] wasm pkg not found at ${src} - build it first:\n` +
     `  wasm-pack build ../../crates/freehold --target web --release --out-dir ../demo/pkg`);
   process.exit(1);
 }
