@@ -118,7 +118,10 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
     let vault;
     try {
       vault = await FreeholdVault.open({
-        wasmUrl: new URL('./pkg/freehold.js', import.meta.url),
+        // Use location.href (not import.meta.url) so the wasm loads from the static ./pkg/ copy at
+        // runtime. import.meta.url makes Vite bundle the glue, whose internal freehold_bg.wasm
+        // reference then mismatches the hashed build asset (404). Matches app.js / custody.
+        wasmUrl: new URL('./pkg/freehold.js', location.href),
         rpName: 'freehold demo',
       });
     } catch (e) {
