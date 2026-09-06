@@ -2,9 +2,11 @@
   "name": "freehold-demo",
   "private": true,
   "type": "module",
-  "description": "freehold demo: VFS self-test harness (/) and passkey-PRF unlock demo (/passkey.html), served over the prebuilt wasm in ./pkg.",
+  "description": "Freehold public site + demos: landing (/), docs (/docs.html), passkey and data-custody demos, and the VFS self-test (/selftest.html), served over the prebuilt wasm in ./pkg.",
   "scripts": {
-    "dev": "vite"
+    "dev": "vite",
+    "build": "vite build && node copy-dist-pkg.mjs",
+    "preview": "vite preview"
   },
   "devDependencies": {
     "vite": "^5.4.0"

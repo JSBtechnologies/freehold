@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 
-// freehold-vfs-merkle-root: headless load of the in-wasm run_tests() harness (the demo `/` page
-// runs run_tests() in a worker and writes the full report into <pre id="out">). We assert the whole
+// freehold-vfs-merkle-root: headless load of the in-wasm run_tests() harness (the demo `/selftest.html`
+// page runs run_tests() in a worker and writes the full report into <pre id="out">). We assert the whole
 // suite passes AND that the new MK (full-state Merkle root) section is present and green.
 test('run_tests(): full suite green incl. MK (full-state Merkle root) section', async ({ page }) => {
   test.setTimeout(120_000);
@@ -9,7 +9,7 @@ test('run_tests(): full suite green incl. MK (full-state Merkle root) section', 
   page.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
   page.on('console', (m) => { if (m.type() === 'error') errors.push('console.error: ' + m.text()); });
 
-  await page.goto('/');
+  await page.goto('/selftest.html');
   // The worker compiles + runs the full suite; wait until the terminal line appears (or a FAILED).
   await page.waitForFunction(() => {
     const t = document.getElementById('out')?.textContent || '';

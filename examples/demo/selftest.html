@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>freehold — encrypting VFS Milestone 2</title>
+  <style>
+    body { margin: 0; font: 14px/1.5 ui-monospace, monospace; background: #0b1020; color: #e6e9f2; }
+    main { max-width: 900px; margin: 0 auto; padding: 28px 20px; }
+    h1 { font-size: 16px; font-family: system-ui, sans-serif; }
+    pre { background: #0e1530; border: 1px solid #24304f; border-radius: 10px; padding: 16px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Encrypting VFS — Milestone 2 (anti-rollback manifest + per-DB subkeys on header-free <code>opfs-sahpool</code>)</h1>
+    <pre id="out">running… (compiling/opening in a worker)</pre>
+  </main>
+  <script type="module">
+    const out = document.getElementById('out');
+    const w = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
+    w.onmessage = (e) => {
+      out.textContent = e.data.ok ? e.data.report : ('ERROR:\n' + e.data.error);
+    };
+    w.onerror = (e) => { out.textContent = 'WORKER ERROR: ' + e.message; };
+    w.postMessage('go');
+  </script>
+  <script type="module" src="./site-nav.js" data-page="selftest"></script>
+</body>
+</html>

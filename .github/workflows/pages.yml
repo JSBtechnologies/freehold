@@ -1,0 +1,60 @@
+name: Deploy site to GitHub Pages
+
+# Builds the Freehold public site (landing + docs + live demos) from examples/demo and publishes it
+# to GitHub Pages. Node-only: the wasm core is committed at examples/demo/pkg, so no Rust toolchain is
+# needed in CI. The site's Vite build uses base "/freehold/" (project-pages hosting).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'examples/demo/**'
+      - 'packages/db/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; don't cancel an in-flight publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: examples/demo/package-lock.json
+
+      - name: Install
+        working-directory: examples/demo
+        run: npm ci
+
+      - name: Build
+        working-directory: examples/demo
+        run: npm run build
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: examples/demo/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
