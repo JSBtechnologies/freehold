@@ -62,13 +62,16 @@ function parseFrontMatter(md) {
 }
 
 function render(slug, label) {
-  const raw = readFileSync(docsDir + slug + '.md', 'utf8');
+  // Normalize line endings first: a stray CRLF otherwise breaks the front-matter regex, so parsing is
+  // deterministic across Windows/CI checkouts.
+  const raw = readFileSync(docsDir + slug + '.md', 'utf8').replace(/\r\n?/g, '\n');
   const { meta, body } = parseFrontMatter(raw);
-  // Title: front-matter title, else first H1, else the sidebar label.
-  let title = meta.title;
-  if (!title) { const h1 = body.match(/^#\s+(.+)$/m); title = h1 ? h1[1] : label; }
-  title = deEm(title).trim();
-  const status = meta.status ? deEm(meta.status) : '';
+  // Title: the concise in-body H1 (the doc's real name), else the front-matter title, else the label.
+  // We deliberately do NOT surface the front-matter `status:` — sign-off dates / build-process notes
+  // are internal metadata, not documentation.
+  const h1 = body.match(/^#\s+(.+)$/m);
+  const title = deEm((h1 ? h1[1] : meta.title) || label).trim();
+  const status = '';
 
   marked.setOptions({ gfm: true, breaks: false });
   let html = marked.parse(body);
