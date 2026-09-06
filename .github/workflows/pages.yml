@@ -10,6 +10,7 @@ on:
     paths:
       - 'examples/demo/**'
       - 'packages/db/**'
+      - 'docs/**'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
