@@ -112,7 +112,7 @@ const escapeHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '
 // ---- wire actions ----
 $('enroll').onclick = guard(async () => {
   const { credId } = await vault.enroll();
-  log(`enrolled — passkey registered (credId ${credId.length} bytes). Now ADD A RECOVERY CODE before you rely on this.`, 'ok');
+  log(`enrolled + unlocked — passkey registered (credId ${credId.length} bytes), session open. ADD A RECOVERY CODE before you rely on this.`, 'ok');
 });
 
 $('unlock').onclick = guard(async () => {

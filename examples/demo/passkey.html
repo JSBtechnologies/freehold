@@ -215,8 +215,7 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
       try {
         $('enroll').disabled = true;
         log('Registering a passkey, wrapping a fresh DEK, opening a session, creating the schema…');
-        await vault.enroll();
-        await vault.unlock(); // one ceremony opens the session; everything below rides it
+        await vault.enroll(); // leaves the vault unlocked — no separate unlock gesture
         // The demo schema is plain SQL through the SDK now — the wasm core is schema-agnostic.
         await vault.sql('CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY, body TEXT, at TEXT)');
         await vault.sql("INSERT INTO notes(body, at) VALUES (?, datetime('now'))",

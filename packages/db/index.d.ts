@@ -114,8 +114,10 @@ export interface ForkImage {
 /** Bindable parameter values for sql() `?` placeholders (blobs deferred). */
 export type SqlParam = string | number | boolean | null;
 
-/** Register a new resident passkey with the PRF extension; resolves to the raw credential id. */
-export declare function registerPasskey(rpName?: string): Promise<Uint8Array>;
+/** Register a new resident passkey with the PRF extension, evaluating PRF(salt) at create() when
+ *  supported. Resolves to the credential id plus the create-time PRF output (null if the authenticator
+ *  only supports prf on get(), in which case the caller falls back to assertPrf). */
+export declare function registerPasskey(rpName?: string): Promise<{ credId: Uint8Array; prf: Uint8Array | null }>;
 
 /** Assert a passkey (UV required) and evaluate PRF(salt); resolves to the PRF output + credential id. */
 export declare function assertPrf(credId?: Uint8Array | null): Promise<{ prf: Uint8Array; credId: Uint8Array }>;

@@ -31,10 +31,9 @@ test('custody: own the data, apps are custodians (grant · tiers · revoke)', as
   await page.goto('/custody.html?e2e=1');
   await expect(page.locator('#vault-log')).toContainText('vault worker up', { timeout: 30_000 });
 
-  // Beat 1 — unlock the vault with a passkey.
+  // Beat 1 — enroll: creates the passkey AND opens the session in one step (enroll leaves the vault
+  // unlocked), so the broker comes live and the owner profile loads with no separate unlock gesture.
   await page.click('#enroll');
-  await expect(page.locator('#state-pill')).toHaveText('locked', { timeout: 15_000 });
-  await page.click('#unlock');
   await expect(page.locator('#state-pill')).toHaveText('unlocked', { timeout: 15_000 });
   await expect(page.locator('#p-name')).toHaveText('Ada Lovelace', { timeout: 15_000 });
 

@@ -38,10 +38,12 @@ function setState(s) {
 }
 
 async function enroll() {
-  await vault.enroll();
-  log('enrolled — a passkey now guards this vault');
-  setState('locked');
-  $('unlock').disabled = false;
+  await vault.enroll(); // leaves the vault unlocked — no separate unlock gesture
+  setState('unlocked');
+  $('lock').disabled = false;
+  $('unlock').disabled = true;
+  await setupBrokerAndApps(); // rides the already-open session (no re-prompt)
+  log('enrolled + unlocked — broker live; apps may request access');
 }
 
 async function unlock() {

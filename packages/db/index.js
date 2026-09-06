@@ -43,7 +43,11 @@ const toBytes = (v) => (typeof v === 'string' ? new TextEncoder().encode(v) : ne
 
 // ---- passkey ceremony helpers (exported — apps may drive the ceremony themselves) ----
 
-/** Register a new resident passkey with the PRF extension. Resolves to the raw credential id. */
+/** Register a new resident passkey with the PRF extension, evaluating PRF(salt) during create() when
+ *  the authenticator supports it. Resolves to `{ credId, prf }` — `prf` is the create-time PRF output
+ *  (Uint8Array) when the authenticator returned it (e.g. Chrome), else null and the caller falls back
+ *  to a get() via assertPrf(). Evaluating at create saves one user gesture; the PRF is deterministic
+ *  for a given (credential, salt), so create-time and get-time outputs are identical. */
 export async function registerPasskey(rpName = DEFAULT_RP_NAME) {
   const cred = await navigator.credentials.create({ publicKey: {
     rp: { name: rpName },
@@ -51,13 +55,14 @@ export async function registerPasskey(rpName = DEFAULT_RP_NAME) {
     challenge: rand(32),
     pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
     authenticatorSelection: { residentKey: 'required', userVerification: 'required' },
-    extensions: { prf: {} },
+    extensions: { prf: { eval: { first: PRF_SALT } } },
   }});
   const ext = cred.getClientExtensionResults();
   if (!ext.prf || ext.prf.enabled === false) {
     throw new Error('This authenticator did not enable the PRF extension.');
   }
-  return new Uint8Array(cred.rawId);
+  const first = ext.prf.results && ext.prf.results.first;
+  return { credId: new Uint8Array(cred.rawId), prf: first ? new Uint8Array(first) : null };
 }
 
 /** Assert an existing passkey and evaluate PRF(salt). UV is required — the PRF output IS the key
@@ -330,19 +335,27 @@ export class FreeholdVault {
     return new Uint8Array(s);
   }
 
-  /** Register a passkey, wrap a fresh DEK under its PRF-KEK, initialize an empty vault. Persists
-   *  the envelope + credential id in IndexedDB. Create your schema via sql() after unlock(). */
+  /** Register a passkey, wrap a fresh DEK under its PRF-KEK, initialize an empty vault, and open a
+   *  session — enroll() leaves the vault UNLOCKED (isUnlocked() === true), so you can sql() right away
+   *  with no extra prompt. Persists the envelope + credential id in IndexedDB. */
   async enroll() {
     await this.lock(); // enrolling re-initializes the pool — a live session would hold its handles
-    const credId = await registerPasskey(this.#rpName);
-    let { prf } = await assertPrf(credId);
-    const envelope = await this.#call('enroll', [prf], [prf.buffer]);
-    prf = null; // buffer transferred (detached) — nothing readable remains on this thread
+    const { credId, prf: createPrf } = await registerPasskey(this.#rpName);
+    // One gesture when the authenticator evaluated the PRF at create-time; otherwise a single get().
+    let prf = createPrf || (await assertPrf(credId)).prf;
+    // The SAME PRF wraps the DEK (enroll) and unwraps it (session_open), so enrolling leaves the vault
+    // unlocked with NO extra gesture. The enroll call copies the PRF (no transfer) so the session_open
+    // call can still use + transfer it. Envelope MUTATIONS (add recovery/passkey, rotate) still require
+    // a fresh gesture — this only opens a session as part of the enrollment the user just authorized.
+    const envelope = await this.#call('enroll', [prf]);
     await idbSet('envelope', envelope);
     await idbSet('credId', credId);
     await idbDel('epoch');
     await idbDel('env_floor');      // fresh vault — clear any stale floor, then seed from gen 1
     await this.#bumpFloor(envelope);
+    await this.#call('session_open', [prf, envelope, new Uint8Array(0)], [prf.buffer]);
+    prf = null; // transferred (detached) — nothing readable remains on this thread
+    this.#touch();
     return { credId };
   }
 
@@ -473,8 +486,8 @@ export class FreeholdVault {
   async addPasskey() {
     const envelope = await this.#envelope();
     let { prf: existing } = await assertPrf((await idbGet('credId')) || null);
-    const newCredId = await registerPasskey(this.#rpName);
-    let { prf: fresh } = await assertPrf(newCredId);
+    const { credId: newCredId, prf: createPrf } = await registerPasskey(this.#rpName);
+    let fresh = createPrf || (await assertPrf(newCredId)).prf; // reuse create-time PRF when available
     const next = await this.#call('add_passkey', [existing, fresh, envelope], [existing.buffer, fresh.buffer]);
     existing = null; fresh = null;
     await idbSet('envelope', next);

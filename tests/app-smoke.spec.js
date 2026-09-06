@@ -30,9 +30,9 @@ test('test app: preflight → enroll → backup → unlock → note round-trips'
   await expect(page.locator('#caps .pill.ok').first()).toBeVisible({ timeout: 30_000 });
   await expect(page.locator('#log')).toContainText('vault worker up', { timeout: 30_000 });
 
-  // Enroll → backup owed.
+  // Enroll → unlocked (enroll opens the session), backup still owed until a recovery code exists.
   await page.click('#enroll');
-  await expect(page.locator('#state-pill')).toHaveText('locked', { timeout: 15_000 });
+  await expect(page.locator('#state-pill')).toHaveText('unlocked', { timeout: 15_000 });
   await expect(page.locator('#backup-pill')).toContainText('backup owed');
 
   // Add a recovery code → the one-time dialog appears → confirm → backup satisfied.
@@ -42,7 +42,10 @@ test('test app: preflight → enroll → backup → unlock → note round-trips'
   await page.click('#code-done');
   await expect(page.locator('#backup-pill')).toBeEmpty();
 
-  // Unlock → write a note → it round-trips through encrypted SQLite.
+  // Enroll already opened a session, so exercise the lock → unlock cycle explicitly, then write a note
+  // that round-trips through encrypted SQLite.
+  await page.click('#lock');
+  await expect(page.locator('#state-pill')).toHaveText('locked', { timeout: 15_000 });
   await page.click('#unlock');
   await expect(page.locator('#state-pill')).toHaveText('unlocked', { timeout: 15_000 });
   await page.fill('#note-input', 'hello from the test app');
