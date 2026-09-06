@@ -47,27 +47,40 @@ pub fn vault_public_key(dek: &[u8; 32]) -> [u8; 32] {
 
 /// The exact bytes signed by an attestation — domain-separated + length-prefixed so no two field
 /// layouts can collide. `claim`/`audience` are bounded to `u16` lengths (attestation claims are tiny);
-/// a `debug_assert` guards against a caller passing a >64 KiB value that would truncate the prefix.
+/// a hard runtime check panics if a caller passes a >64 KiB value that would truncate the prefix,
+/// rather than silently corrupting the canonical message.
 pub fn canonical_message(claim: &str, audience: &[u8], issued_at: u64, expiry: u64) -> Vec<u8> {
-    debug_assert!(claim.len() <= u16::MAX as usize, "attest: claim too long");
-    debug_assert!(audience.len() <= u16::MAX as usize, "attest: audience too long");
+    // Hard runtime check (NOT debug-only): a >u16::MAX claim/audience would silently truncate the
+    // length prefix in release, so the signed message would differ from what the verifier recomputes
+    // (or collide). Fail closed rather than proceed with a corrupted canonical message.
+    let claim_len = u16::try_from(claim.len()).expect("attest: claim too long");
+    let audience_len = u16::try_from(audience.len()).expect("attest: audience too long");
     let mut m = Vec::with_capacity(ATTEST_DOMAIN.len() + 2 + claim.len() + 2 + audience.len() + 16);
     m.extend_from_slice(ATTEST_DOMAIN);
-    m.extend_from_slice(&(claim.len() as u16).to_le_bytes());
+    m.extend_from_slice(&claim_len.to_le_bytes());
     m.extend_from_slice(claim.as_bytes());
-    m.extend_from_slice(&(audience.len() as u16).to_le_bytes());
+    m.extend_from_slice(&audience_len.to_le_bytes());
     m.extend_from_slice(audience);
     m.extend_from_slice(&issued_at.to_le_bytes());
     m.extend_from_slice(&expiry.to_le_bytes());
     m
 }
 
+/// Sign the canonical attestation message with an **explicit Ed25519 seed** — the single signing
+/// routine shared by DEK-derived attestations and the device-cert path (which signs the same
+/// domain-separated + length-prefixed message under the *independent* vault trust key, not a
+/// DEK-derived seed). Held in `Zeroizing` at the call site; this fn never persists the seed.
+/// Reusing this (rather than forking a second `sign`) keeps ONE canonical-message discipline.
+pub fn attest_with_seed(seed: &[u8; 32], claim: &str, audience: &[u8], issued_at: u64, expiry: u64) -> [u8; 64] {
+    let sk = SigningKey::from_bytes(seed);
+    let msg = canonical_message(claim, audience, issued_at, expiry);
+    sk.sign(&msg).to_bytes()
+}
+
 /// Sign an attestation with the vault identity key. Needs the DEK (worker-only). Returns the 64-byte
 /// Ed25519 signature; the caller assembles the `{claim, audience, issued_at, expiry, pubkey, sig}` object.
 pub fn attest(dek: &[u8; 32], claim: &str, audience: &[u8], issued_at: u64, expiry: u64) -> [u8; 64] {
-    let sk = SigningKey::from_bytes(&vault_identity_seed(dek));
-    let msg = canonical_message(claim, audience, issued_at, expiry);
-    sk.sign(&msg).to_bytes()
+    attest_with_seed(&vault_identity_seed(dek), claim, audience, issued_at, expiry)
 }
 
 /// Verify an attestation signature against a public key. **Pure** — no DEK, no clock. `verify_strict`

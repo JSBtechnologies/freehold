@@ -76,6 +76,9 @@ const HEADER_OFFSET_DATA: usize = SECTOR_SIZE;
 // ENC (sync-epoch): AAD binding the epoch token to its purpose (sync-epoch-design §4).
 const EPOCH_AAD: &[u8] = b"freehold-epoch";
 
+// ENC (device-trust §1.1): AAD binding the sealed vault trust-key seed to its purpose.
+const TRUST_SEED_AAD: &[u8] = b"freehold-vault-trust-seed";
+
 const PERSISTENT_FILE_TYPES: i32 =
     SQLITE_OPEN_MAIN_DB | SQLITE_OPEN_MAIN_JOURNAL | SQLITE_OPEN_SUPER_JOURNAL | SQLITE_OPEN_WAL;
 
@@ -2013,6 +2016,55 @@ impl OpfsSAHPool {
         crate::attest::attest(&self.dek, claim, audience, issued_at, expiry)
     }
 
+    // ENC (device-trust §1.1/§1.5): obtain the vault's INDEPENDENT trust-key seed. If `sealed` is
+    // empty, generate a fresh random seed (getrandom, fail-closed) and seal it under
+    // HKDF(DEK,"freehold-vault-trust-v1") — first-use provisioning; otherwise unseal the existing
+    // blob. The seed is NOT DEK-derived (so the keypair survives DEK rotation, §1.5) but its
+    // *sealing* key is DEK-derived, so re-sealing under a rotated DEK keeps the SAME keypair. The
+    // seed stays inside the pool in `Zeroizing`; only the sealed blob (opaque ciphertext) and the
+    // trust public key ever cross out. Returns `(Zeroizing<seed>, sealed_blob)` — the caller
+    // persists `sealed_blob` (unchanged when it was already provisioned).
+    fn trust_seed(&self, sealed: &[u8]) -> Result<(Zeroizing<[u8; 32]>, Vec<u8>)> {
+        let sealer = Crypto::trust_seal_key(&self.dek);
+        if sealed.is_empty() {
+            let seed = crate::device::random_trust_seed()
+                .map_err(|e| OpfsSAHError::Generic(format!("trust seed rng: {e}")))?;
+            let blob = sealer
+                .seal_bytes(TRUST_SEED_AAD, seed.as_slice())
+                .map_err(|e| OpfsSAHError::Generic(format!("trust seed seal: {e:?}")))?;
+            Ok((seed, blob))
+        } else {
+            let plain = Zeroizing::new(
+                sealer
+                    .open_bytes(TRUST_SEED_AAD, sealed)
+                    .map_err(|e| OpfsSAHError::Generic(format!("trust seed unseal: {e:?}")))?,
+            );
+            let seed: [u8; 32] = <[u8; 32]>::try_from(plain.as_slice())
+                .map_err(|_| OpfsSAHError::Generic("trust seed blob wrong length".into()))?;
+            Ok((Zeroizing::new(seed), sealed.to_vec()))
+        }
+    }
+
+    // ENC (device-trust §1.3, increment 1): issue a device cert for `device_pubkey` chaining to the
+    // vault trust key. Obtains/provisions the trust seed (`trust_seed`), then signs via the SAME
+    // `attest` path (device::issue_device_cert → attest::attest_with_seed). Returns
+    // `(claim, sig(64), trust_pubkey(32), sealed_trust_blob)` — the DEK and trust seed never leave
+    // the pool; only the claim/sig, the public trust key, and the opaque sealed blob cross out.
+    #[allow(clippy::type_complexity)]
+    fn issue_device_cert(
+        &self,
+        sealed_trust: &[u8],
+        device_pubkey: &[u8; 32],
+        caps: &[String],
+        issued_at: u64,
+        expiry: u64,
+    ) -> Result<(String, [u8; 64], [u8; 32], Vec<u8>)> {
+        let (seed, blob) = self.trust_seed(sealed_trust)?;
+        let trust_pk = crate::device::vault_trust_public_key(&seed);
+        let (claim, sig) = crate::device::issue_device_cert(&seed, device_pubkey, caps, issued_at, expiry);
+        Ok((claim, sig, trust_pk, blob))
+    }
+
     // ============ ENC (freehold-sync-design §4/§5): sync-layer key material ============
     // Both derive purely from the DEK (no manifest / generation), exactly like `epoch_key` above: the
     // DEK stays inside the pool. Only the opaque 16-byte `sync_id` (a capability, not the key) and
@@ -3089,6 +3141,24 @@ impl OpfsSAHPoolUtil {
     /// REAL DEK. `issued_at`/`expiry` are unix seconds supplied by the caller (the core reads no clock).
     pub fn attest(&self, claim: &str, audience: &[u8], issued_at: u64, expiry: u64) -> [u8; 64] {
         self.pool.attest(claim, audience, issued_at, expiry)
+    }
+
+    /// ENC (device-trust §1.3, increment 1): issue a device cert for `device_pubkey` chaining to the
+    /// vault trust key, signed via the `attest` path. `sealed_trust` is the vault's persisted sealed
+    /// trust-seed blob (empty on first use ⇒ a fresh trust key is provisioned + sealed). Returns
+    /// `(claim, sig, trust_pubkey, sealed_trust_blob)`; the caller persists the (possibly-new) sealed
+    /// blob. Requires the REAL DEK (the trust seed is sealed under HKDF(DEK,…)).
+    #[allow(clippy::type_complexity)]
+    pub fn issue_device_cert(
+        &self,
+        sealed_trust: &[u8],
+        device_pubkey: &[u8; 32],
+        caps: &[String],
+        issued_at: u64,
+        expiry: u64,
+    ) -> Result<(String, [u8; 64], [u8; 32], Vec<u8>)> {
+        self.pool
+            .issue_device_cert(sealed_trust, device_pubkey, caps, issued_at, expiry)
     }
 
     /// ENC (sync-epoch): apply a peer's epoch token — verify + raise the local DB freshness

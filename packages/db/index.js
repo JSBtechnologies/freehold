@@ -584,6 +584,115 @@ export class FreeholdVault {
     return ok ? { ok: true } : { ok: false, reason: 'signature invalid' };
   }
 
+  // ---- Device trust (docs/device-trust-design.md §1, increment 1): device identity + certs ----
+  // A SIGNING-ONLY Ed25519 device key generated in wasm. Its 32-byte seed is wrapped at rest under a
+  // per-origin NON-EXTRACTABLE AES-GCM CryptoKey in IndexedDB — the SAME pattern as the convenience
+  // tier's #deviceSecret (the seed is never a non-extractable *signing* key; dalek can't consume one).
+  // This is a SEPARATE identity from the version-vector `syncDeviceId` (#deviceId, §1.7) — do not
+  // conflate: syncDeviceId is sync lineage, this device_id = H(device_pubkey) is the cert subject.
+
+  /** Provision this device's signing-only Ed25519 identity on first use, or return the existing one.
+   *  The seed is generated in wasm, wrapped under a fresh non-extractable AES-GCM CryptoKey in IDB, and
+   *  never persisted in the clear. Returns `{ pubkey, deviceId }`. Internal — callers use deviceId()/
+   *  issueDeviceCert(); exposed via those. */
+  async #deviceIdentity() {
+    const existing = await idbGet('deviceIdentityPubkey');
+    if (existing) {
+      return { pubkey: new Uint8Array(existing), deviceId: await idbGet('deviceCertId') };
+    }
+    // device_keygen returns seed(32)‖pubkey(32); the seed crosses the boundary once, then is wrapped
+    // and dropped (same acceptable window as the convenience-tier secret — see §9 guardrails).
+    const packed = await this.#call('device_keygen', []);
+    let seed = packed.slice(0, 32);
+    const pubkey = packed.slice(32, 64);
+    const idKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    const iv = rand(12);
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, idKey, seed));
+    seed = null; // wrapped — nothing readable remains on this thread
+    const deviceId = await this.#call('device_id_from_pubkey', [pubkey]);
+    await idbSet('deviceIdentityKey', idKey);          // CryptoKey stored by reference (non-extractable)
+    await idbSet('deviceIdentityWrap', { iv, ct });
+    await idbSet('deviceIdentityPubkey', pubkey);
+    await idbSet('deviceCertId', deviceId);
+    return { pubkey, deviceId };
+  }
+
+  /** This device's certificate identity: `device_id = "dev_" + base64url(SHA-256(label ‖ pubkey))[..12]`
+   *  (docs/device-trust-design.md §1.2). Provisions the device key on first call. This is DISTINCT from
+   *  the sync-lineage device id (§1.7) — it is the subject of device certs / revocation / audit. */
+  async deviceId() {
+    return (await this.#deviceIdentity()).deviceId;
+  }
+
+  /** This device's signing-only Ed25519 public key (32 bytes). Provisions the key on first call. */
+  async devicePublicKey() {
+    return (await this.#deviceIdentity()).pubkey;
+  }
+
+  /** Issue a device certificate for THIS device (or a supplied `devicePubkey`) chaining to the vault's
+   *  independent trust key (docs/device-trust-design.md §1.3). The trust key is provisioned + sealed
+   *  under HKDF(DEK,…) on first use and stays stable across DEK rotation. `caps` is a scope list
+   *  (grant-token vocabulary), canonicalized (sorted/deduped) inside wasm. Requires an open session
+   *  (the DEK unseals the trust key). Persists the trust-key sealed blob + this device's cert, and
+   *  resolves to the cert object `{ v, claim, devicePubkey, trustPublicKey, sig, issuedAt, expiry, caps }`. */
+  async issueDeviceCert({ devicePubkey = null, caps = [], ttlSeconds = 365 * 24 * 3600 } = {}) {
+    if (!(await this.isUnlocked())) throw new Error('vault is locked — unlock() before issueDeviceCert()');
+    const pubkey = devicePubkey ? new Uint8Array(devicePubkey) : await this.devicePublicKey();
+    if (pubkey.length !== 32) throw new Error('issueDeviceCert: devicePubkey must be 32 bytes');
+    const capsBytes = new TextEncoder().encode((Array.isArray(caps) ? caps : [caps]).join('\n'));
+    const issuedAt = Math.floor(Date.now() / 1000);
+    const expiry = issuedAt + Math.max(1, Math.floor(ttlSeconds));
+    const sealedTrust = (await idbGet('trustSeed')) || EMPTY;
+    // Packed: u32_LE(claim.len) ‖ claim(UTF-8) ‖ sig(64) ‖ trust_pubkey(32) ‖ sealed_trust_blob.
+    const packed = await this.#call('session_issue_device_cert', [pubkey, capsBytes, sealedTrust, issuedAt, expiry]);
+    const dv = new DataView(packed.buffer, packed.byteOffset, packed.byteLength);
+    const claimLen = dv.getUint32(0, true);
+    let off = 4;
+    const claim = new TextDecoder().decode(packed.slice(off, off + claimLen)); off += claimLen;
+    const sig = packed.slice(off, off + 64); off += 64;
+    const trustPublicKey = packed.slice(off, off + 32); off += 32;
+    const sealedBlob = packed.slice(off); // possibly-new sealed trust seed
+    await idbSet('trustSeed', sealedBlob);
+    const cert = {
+      v: 1, claim, devicePubkey: pubkey, trustPublicKey, sig, issuedAt, expiry,
+      caps: (Array.isArray(caps) ? caps : [caps]).map((s) => String(s).trim()).filter(Boolean).sort(),
+    };
+    // Persist as THIS device's cert only when it certifies this device's own key.
+    const ownPubkey = await this.devicePublicKey();
+    if (eqBytes(pubkey, ownPubkey)) await idbSet('deviceCert', cert);
+    return cert;
+  }
+
+  /** The vault trust public key (32 bytes) — the pinned root device certs chain to. Provisions +
+   *  seals the trust key on first use (idempotently, via a throwaway self-cert is NOT done here; the
+   *  key is provisioned lazily by issueDeviceCert). Returns null if no cert has ever been issued. */
+  async trustPublicKey() {
+    const cert = await idbGet('deviceCert');
+    return cert ? new Uint8Array(cert.trustPublicKey) : null;
+  }
+
+  /** This device's stored certificate (from a prior issueDeviceCert / pairing), or null. */
+  async deviceCert() {
+    return (await idbGet('deviceCert')) || null;
+  }
+
+  /** Verify a device certificate — PURE (no session/DEK/clock; callable even when locked). Checks the
+   *  recompute-and-byte-compare tamper gate, `device_id == H(device_pubkey)`, the Ed25519 signature via
+   *  verify_strict under the pinned `trustPublicKey`, and the validity window. `expect.now` is a JS ms
+   *  timestamp (defaults to Date.now()). `expect.trustPublicKey` (when supplied) must equal the cert's —
+   *  pin YOUR vault's trust key so a cert from another vault is rejected. Returns `{ ok, reason }`. */
+  async verifyDeviceCert(cert, expect = {}) {
+    if (!cert || cert.v !== 1) return { ok: false, reason: 'not a v1 device cert' };
+    const trustPk = expect.trustPublicKey != null ? new Uint8Array(expect.trustPublicKey) : new Uint8Array(cert.trustPublicKey);
+    if (expect.trustPublicKey != null && !eqBytes(trustPk, cert.trustPublicKey)) {
+      return { ok: false, reason: 'trust key mismatch' };
+    }
+    const nowSec = Math.floor((expect.now != null ? expect.now : Date.now()) / 1000);
+    const ok = await this.#call('verify_device_cert',
+      [trustPk, cert.claim, new Uint8Array(cert.devicePubkey), new Uint8Array(cert.sig), nowSec]);
+    return ok ? { ok: true } : { ok: false, reason: 'invalid (signature / device_id / window / tamper)' };
+  }
+
   /** Run SQL in the open session (unlock() first — no prompt here, that's the point). `params` is
    *  an array bound to `?` placeholders (null | boolean | number | string; blobs deferred) and
    *  requires a single statement; with no params, multi-statement scripts are allowed. `db` names
@@ -779,6 +888,11 @@ export class FreeholdVault {
     await idbDel('syncVv');
     await idbDel('syncCursor');
     await idbDel('syncForks');
+    // Device-trust (§1): the vault-scoped trust seed + this device's cert are forgotten with the vault.
+    // The device's own signing key (deviceIdentity*) + device_id are KEPT — like syncDeviceId, they are
+    // a stable per-device identity (§1.7), independent of any one vault's DEK.
+    await idbDel('trustSeed');
+    await idbDel('deviceCert');
   }
 
   /** Terminate the worker and release the cross-tab lock. The vault is unusable afterwards. */

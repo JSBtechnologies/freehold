@@ -13,6 +13,9 @@ const OPS = new Set([
   'session_sql', 'session_export',
   // Vault signing (docs/vault-signing-design.md): identity pubkey + attest are session-gated; verify is pure.
   'session_vault_pubkey', 'session_attest', 'verify_attestation',
+  // Device trust (docs/device-trust-design.md §1): device keygen + device_id are pure; cert issuance is
+  // session-gated (needs the DEK to unseal the trust key); cert verify is pure.
+  'device_keygen', 'device_id_from_pubkey', 'session_issue_device_cert', 'verify_device_cert',
   // Freehold Sync (freehold-sync-design §10 item 3): crypto + conflict logic in wasm; the loop in JS.
   'session_sync_id', 'session_sync_seal', 'session_sync_open', 'session_sync_apply',
   'sync_vv_empty', 'sync_vv_increment', 'sync_vv_merge', 'sync_reconcile',

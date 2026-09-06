@@ -48,6 +48,50 @@ export function add_recovery(existing_prf, code, blob) {
 }
 
 /**
+ * `device_id = "dev_" + base64url(SHA-256("freehold-device-id-v1" ‖ device_pubkey))[..12]` (§1.2).
+ * Pure, deterministic; a malformed (non-32-byte) pubkey is an error, never a panic.
+ * @param {Uint8Array} device_pubkey
+ * @returns {string}
+ */
+export function device_id_from_pubkey(device_pubkey) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passArray8ToWasm0(device_pubkey, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.device_id_from_pubkey(ptr0, len0);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * Generate a fresh device Ed25519 seed (32 bytes) in wasm and return `seed(32) ‖ pubkey(32)` (§1.6).
+ * The seed briefly crosses the boundary as bytes (same as the convenience-tier secret) — the SDK
+ * MUST wrap it immediately under a non-extractable AES-GCM CryptoKey and never persist it in the
+ * clear. Fail-closed on RNG error (never a weak/zero seed). Pure keygen — no session/DEK needed.
+ * @returns {Uint8Array}
+ */
+export function device_keygen() {
+    const ret = wasm.device_keygen();
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v1;
+}
+
+/**
  * Enroll: wrap a fresh DEK under the PRF-KEK, initialize an empty vault, return the envelope blob.
  * @param {Uint8Array} prf
  * @returns {Promise<Uint8Array>}
@@ -268,6 +312,38 @@ export function session_export(cred_id, envelope) {
     var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
     return v3;
+}
+
+/**
+ * Issue a device cert (§1.3). Inside `with_session`: obtains/provisions the vault trust key (sealed
+ * under HKDF(DEK,…)), builds the canonical claim for `device_pubkey`, and signs it via the SAME
+ * `attest` path under the trust key. `caps` is UTF-8, scopes `'\n'`-separated (canonicalized inside).
+ * `sealed_trust` is the vault's persisted sealed trust-seed blob (empty on first use). `issued_at`/
+ * `expiry` are unix seconds crossed as f64 (exact through 2⁵³); the core reads no clock.
+ *
+ * Returns a packed blob for the SDK to unpack + persist:
+ * `u32_LE(claim.len) ‖ claim(UTF-8) ‖ sig(64) ‖ trust_pubkey(32) ‖ sealed_trust_blob`.
+ * @param {Uint8Array} device_pubkey
+ * @param {Uint8Array} caps
+ * @param {Uint8Array} sealed_trust
+ * @param {number} issued_at
+ * @param {number} expiry
+ * @returns {Uint8Array}
+ */
+export function session_issue_device_cert(device_pubkey, caps, sealed_trust, issued_at, expiry) {
+    const ptr0 = passArray8ToWasm0(device_pubkey, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(caps, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passArray8ToWasm0(sealed_trust, wasm.__wbindgen_malloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.session_issue_device_cert(ptr0, len0, ptr1, len1, ptr2, len2, issued_at, expiry);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v4 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v4;
 }
 
 /**
@@ -547,6 +623,31 @@ export function verify_attestation(pubkey, claim, audience, issued_at, expiry, s
     const ptr3 = passArray8ToWasm0(sig, wasm.__wbindgen_malloc);
     const len3 = WASM_VECTOR_LEN;
     const ret = wasm.verify_attestation(ptr0, len0, ptr1, len1, ptr2, len2, issued_at, expiry, ptr3, len3);
+    return ret !== 0;
+}
+
+/**
+ * Verify a device cert — **pure**, no session/DEK/clock (§1.3). Recompute-and-byte-compare against
+ * the cert's structured fields, `device_id == H(device_pubkey)`, `verify_strict` under the pinned
+ * `vault_trust_pubkey`, the validity window against `now`, and caps well-formedness. A malformed
+ * pubkey/sig length yields false (never a panic). `now` is unix seconds (crossed as f64).
+ * @param {Uint8Array} vault_trust_pubkey
+ * @param {string} cert_claim
+ * @param {Uint8Array} device_pubkey
+ * @param {Uint8Array} sig
+ * @param {number} now
+ * @returns {boolean}
+ */
+export function verify_device_cert(vault_trust_pubkey, cert_claim, device_pubkey, sig, now) {
+    const ptr0 = passArray8ToWasm0(vault_trust_pubkey, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(cert_claim, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passArray8ToWasm0(device_pubkey, wasm.__wbindgen_malloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ptr3 = passArray8ToWasm0(sig, wasm.__wbindgen_malloc);
+    const len3 = WASM_VECTOR_LEN;
+    const ret = wasm.verify_device_cert(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, now);
     return ret !== 0;
 }
 function __wbg_get_imports() {
@@ -968,7 +1069,7 @@ function __wbg_get_imports() {
             return ret;
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 717, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 721, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__ha22148a4a7c1d5ff);
             return ret;
         },

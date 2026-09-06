@@ -131,6 +131,18 @@ impl Crypto {
     pub fn rotate_intent_key(dek: &[u8; 32]) -> Self {
         Self::from_info(dek, b"freehold-rotate-intent-v1")
     }
+
+    /// Subkey sealing the **independent vault trust-key seed** (device-trust-design §1.1/§1.5). The
+    /// trust key is a standalone Ed25519 keypair (its seed is a fresh CSPRNG draw, NOT HKDF(DEK,…) —
+    /// see `device::vault_trust_public_key`); at rest its 32-byte seed is sealed under
+    /// `HKDF(DEK, "freehold-vault-trust-v1")` as its own envelope-adjacent slot, carried in the
+    /// bundle. This is a *seal domain*, not the key itself: the trust keypair stays stable across DEK
+    /// rotation (only the sealing key changes), which is exactly what lets device certs survive
+    /// rotation. Domain-separated from every other subkey; no new cryptography — same
+    /// `seal_bytes`/`open_bytes` AEAD.
+    pub fn trust_seal_key(dek: &[u8; 32]) -> Self {
+        Self::from_info(dek, b"freehold-vault-trust-v1")
+    }
 }
 
 // The per-database **sync-id** (the blind-relay bucket name) now lives in `relay_auth` — it is bound

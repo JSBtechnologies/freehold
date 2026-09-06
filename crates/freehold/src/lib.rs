@@ -28,6 +28,7 @@
 mod attest;
 mod bundle;
 mod crypto;
+mod device;
 mod envelope;
 mod manifest;
 mod relay_auth;
@@ -447,6 +448,9 @@ async fn sync_test() -> std::result::Result<String, String> {
     sync::self_check()?;
     // Relay-auth key derivation, the pubkey↔sync_id commitment, and sign/verify (docs/relay-auth-design.md).
     relay_auth::self_check()?;
+    // Device identity + device certs: keygen determinism, device_id vector, cert issue/verify
+    // round-trip, tamper/wrong-key/expiry rejection (docs/device-trust-design.md §1, increment 1).
+    device::self_check()?;
 
     // One logical DB → one relay bucket. sync_id is opaque to the relay, derived off the shared DEK.
     let db_uuid: [u8; 16] = *b"freehold-sy-uuid";
@@ -3065,6 +3069,96 @@ pub fn verify_attestation(
         return false;
     };
     attest::verify(&pk, claim, audience, issued_at as u64, expiry as u64, &s)
+}
+
+// ---- Device trust (docs/device-trust-design.md §1, increment 1): device identity + certs ----
+
+/// Generate a fresh device Ed25519 seed (32 bytes) in wasm and return `seed(32) ‖ pubkey(32)` (§1.6).
+/// The seed briefly crosses the boundary as bytes (same as the convenience-tier secret) — the SDK
+/// MUST wrap it immediately under a non-extractable AES-GCM CryptoKey and never persist it in the
+/// clear. Fail-closed on RNG error (never a weak/zero seed). Pure keygen — no session/DEK needed.
+#[wasm_bindgen]
+pub fn device_keygen() -> Result<Vec<u8>, JsValue> {
+    install_panic_hook();
+    let seed = device::random_device_seed().map_err(|e| JsValue::from_str(e))?;
+    let pk = device::device_public_key(&seed);
+    let mut out = Vec::with_capacity(64);
+    out.extend_from_slice(seed.as_slice());
+    out.extend_from_slice(&pk);
+    Ok(out)
+}
+
+/// `device_id = "dev_" + base64url(SHA-256("freehold-device-id-v1" ‖ device_pubkey))[..12]` (§1.2).
+/// Pure, deterministic; a malformed (non-32-byte) pubkey is an error, never a panic.
+#[wasm_bindgen]
+pub fn device_id_from_pubkey(device_pubkey: &[u8]) -> Result<String, JsValue> {
+    let pk = <[u8; 32]>::try_from(device_pubkey)
+        .map_err(|_| JsValue::from_str("device_pubkey must be 32 bytes"))?;
+    Ok(device::device_id_from_pubkey(&pk))
+}
+
+/// Issue a device cert (§1.3). Inside `with_session`: obtains/provisions the vault trust key (sealed
+/// under HKDF(DEK,…)), builds the canonical claim for `device_pubkey`, and signs it via the SAME
+/// `attest` path under the trust key. `caps` is UTF-8, scopes `'\n'`-separated (canonicalized inside).
+/// `sealed_trust` is the vault's persisted sealed trust-seed blob (empty on first use). `issued_at`/
+/// `expiry` are unix seconds crossed as f64 (exact through 2⁵³); the core reads no clock.
+///
+/// Returns a packed blob for the SDK to unpack + persist:
+/// `u32_LE(claim.len) ‖ claim(UTF-8) ‖ sig(64) ‖ trust_pubkey(32) ‖ sealed_trust_blob`.
+#[wasm_bindgen]
+pub fn session_issue_device_cert(
+    device_pubkey: &[u8],
+    caps: &[u8],
+    sealed_trust: &[u8],
+    issued_at: f64,
+    expiry: f64,
+) -> Result<Vec<u8>, JsValue> {
+    install_panic_hook();
+    let pk = <[u8; 32]>::try_from(device_pubkey)
+        .map_err(|_| JsValue::from_str("device_pubkey must be 32 bytes"))?;
+    let caps_str = std::str::from_utf8(caps).map_err(|_| JsValue::from_str("caps must be UTF-8"))?;
+    let cap_list: Vec<String> = caps_str
+        .split('\n')
+        .map(|s| s.to_string())
+        .filter(|s| !s.trim().is_empty())
+        .collect();
+    with_session(|util| {
+        util.issue_device_cert(sealed_trust, &pk, &cap_list, issued_at as u64, expiry as u64)
+    })
+    .map_err(|e| JsValue::from_str(&e))?
+    .map(|(claim, sig, trust_pk, blob)| {
+        let cb = claim.as_bytes();
+        let mut out = Vec::with_capacity(4 + cb.len() + 64 + 32 + blob.len());
+        out.extend_from_slice(&(cb.len() as u32).to_le_bytes());
+        out.extend_from_slice(cb);
+        out.extend_from_slice(&sig);
+        out.extend_from_slice(&trust_pk);
+        out.extend_from_slice(&blob);
+        out
+    })
+    .map_err(|e| JsValue::from_str(&format!("issue_device_cert: {e:?}")))
+}
+
+/// Verify a device cert — **pure**, no session/DEK/clock (§1.3). Recompute-and-byte-compare against
+/// the cert's structured fields, `device_id == H(device_pubkey)`, `verify_strict` under the pinned
+/// `vault_trust_pubkey`, the validity window against `now`, and caps well-formedness. A malformed
+/// pubkey/sig length yields false (never a panic). `now` is unix seconds (crossed as f64).
+#[wasm_bindgen]
+pub fn verify_device_cert(
+    vault_trust_pubkey: &[u8],
+    cert_claim: &str,
+    device_pubkey: &[u8],
+    sig: &[u8],
+    now: f64,
+) -> bool {
+    let (Ok(tk), Ok(dk), Ok(s)) = (
+        <[u8; 32]>::try_from(vault_trust_pubkey),
+        <[u8; 32]>::try_from(device_pubkey),
+        <[u8; 64]>::try_from(sig),
+    ) else {
+        return false;
+    };
+    device::verify_device_cert(&tk, cert_claim, &dk, &s, now as u64)
 }
 
 // issue #4 / D-RK1..4 (DEK rotation, increment 2): the whole ceremony, atomic in the worker. Takes the

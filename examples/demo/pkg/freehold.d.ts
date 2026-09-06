@@ -13,6 +13,20 @@ export function add_passkey(existing_prf: Uint8Array, new_prf: Uint8Array, blob:
 export function add_recovery(existing_prf: Uint8Array, code: string, blob: Uint8Array): Uint8Array;
 
 /**
+ * `device_id = "dev_" + base64url(SHA-256("freehold-device-id-v1" ‖ device_pubkey))[..12]` (§1.2).
+ * Pure, deterministic; a malformed (non-32-byte) pubkey is an error, never a panic.
+ */
+export function device_id_from_pubkey(device_pubkey: Uint8Array): string;
+
+/**
+ * Generate a fresh device Ed25519 seed (32 bytes) in wasm and return `seed(32) ‖ pubkey(32)` (§1.6).
+ * The seed briefly crosses the boundary as bytes (same as the convenience-tier secret) — the SDK
+ * MUST wrap it immediately under a non-extractable AES-GCM CryptoKey and never persist it in the
+ * clear. Fail-closed on RNG error (never a weak/zero seed). Pure keygen — no session/DEK needed.
+ */
+export function device_keygen(): Uint8Array;
+
+/**
  * Enroll: wrap a fresh DEK under the PRF-KEK, initialize an empty vault, return the envelope blob.
  */
 export function enroll(prf: Uint8Array): Promise<Uint8Array>;
@@ -92,6 +106,18 @@ export function session_attest(claim: string, audience: Uint8Array, issued_at: n
  * is attested in the epoch, so a method added since unlock is reflected in the bundle.
  */
 export function session_export(cred_id: Uint8Array, envelope: Uint8Array): Uint8Array;
+
+/**
+ * Issue a device cert (§1.3). Inside `with_session`: obtains/provisions the vault trust key (sealed
+ * under HKDF(DEK,…)), builds the canonical claim for `device_pubkey`, and signs it via the SAME
+ * `attest` path under the trust key. `caps` is UTF-8, scopes `'\n'`-separated (canonicalized inside).
+ * `sealed_trust` is the vault's persisted sealed trust-seed blob (empty on first use). `issued_at`/
+ * `expiry` are unix seconds crossed as f64 (exact through 2⁵³); the core reads no clock.
+ *
+ * Returns a packed blob for the SDK to unpack + persist:
+ * `u32_LE(claim.len) ‖ claim(UTF-8) ‖ sig(64) ‖ trust_pubkey(32) ‖ sealed_trust_blob`.
+ */
+export function session_issue_device_cert(device_pubkey: Uint8Array, caps: Uint8Array, sealed_trust: Uint8Array, issued_at: number, expiry: number): Uint8Array;
 
 /**
  * Lock the session: close handles, release the pool (see `session_lock_inner`), drop the session.
@@ -178,12 +204,22 @@ export function sync_vv_merge(a: Uint8Array, b: Uint8Array): Uint8Array;
  */
 export function verify_attestation(pubkey: Uint8Array, claim: string, audience: Uint8Array, issued_at: number, expiry: number, sig: Uint8Array): boolean;
 
+/**
+ * Verify a device cert — **pure**, no session/DEK/clock (§1.3). Recompute-and-byte-compare against
+ * the cert's structured fields, `device_id == H(device_pubkey)`, `verify_strict` under the pinned
+ * `vault_trust_pubkey`, the validity window against `now`, and caps well-formedness. A malformed
+ * pubkey/sig length yields false (never a panic). `now` is unix seconds (crossed as f64).
+ */
+export function verify_device_cert(vault_trust_pubkey: Uint8Array, cert_claim: string, device_pubkey: Uint8Array, sig: Uint8Array, now: number): boolean;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly add_passkey: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly add_recovery: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly device_id_from_pubkey: (a: number, b: number) => [number, number, number, number];
+    readonly device_keygen: () => [number, number, number, number];
     readonly enroll: (a: number, b: number) => any;
     readonly enroll_device: (a: number, b: number) => any;
     readonly envelope_generation: (a: number, b: number) => number;
@@ -197,6 +233,7 @@ export interface InitOutput {
     readonly session_active: () => number;
     readonly session_attest: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly session_export: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly session_issue_device_cert: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly session_lock: () => [number, number];
     readonly session_open: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
     readonly session_open_recovery: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
@@ -212,6 +249,7 @@ export interface InitOutput {
     readonly sync_vv_increment: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly sync_vv_merge: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly verify_attestation: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => number;
+    readonly verify_device_cert: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => number;
     readonly rust_sqlite_wasm_abort: () => void;
     readonly rust_sqlite_wasm_assert_fail: (a: number, b: number, c: number, d: number) => void;
     readonly rust_sqlite_wasm_calloc: (a: number, b: number) => number;

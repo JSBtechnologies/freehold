@@ -36,6 +36,27 @@ export interface AttestExpectations {
   now?: number; // JS ms timestamp; defaults to Date.now()
 }
 
+/** A device certificate: a grant-token-shaped claim binding a signing-only device Ed25519 key into a
+ *  vault, signed by the vault's INDEPENDENT trust key (docs/device-trust-design.md §1.3). `claim` is
+ *  the base64url canonical claim string; `devicePubkey` is the certified key; `trustPublicKey` is the
+ *  pinned root; `sig` is the 64-byte Ed25519 signature. `issuedAt`/`expiry` are unix seconds. Verify
+ *  with `FreeholdVault.verifyDeviceCert` (pure — no DEK). The `device_id` is `H(devicePubkey)`. */
+export interface DeviceCert {
+  v: 1;
+  claim: string;
+  devicePubkey: Uint8Array;   // 32-byte signing-only device Ed25519 public key
+  trustPublicKey: Uint8Array; // 32-byte vault trust public key (the pinned cert root)
+  sig: Uint8Array;            // 64-byte Ed25519 signature under the trust key
+  issuedAt: number;
+  expiry: number;
+  caps: string[];             // sorted scope list (grant-token vocabulary)
+}
+
+export interface DeviceCertExpectations {
+  trustPublicKey?: Uint8Array; // pin YOUR vault's trust key; a cert under another root is rejected
+  now?: number;                // JS ms timestamp; defaults to Date.now()
+}
+
 /** Metadata carried by a `.freehold` bundle (fields are empty Uint8Arrays when absent). */
 export interface BundleMeta {
   envelope: Uint8Array;
@@ -166,6 +187,33 @@ export declare class FreeholdVault {
 
   /** Verify an attestation (pure — no DEK). Checks the signature, expiry, and any supplied expectations. */
   verifyAttestation(att: Attestation, expect?: AttestExpectations): Promise<{ ok: boolean; reason?: string }>;
+
+  // ---- Device trust (docs/device-trust-design.md §1): device identity + certs ----
+
+  /** This device's certificate identity `device_id = "dev_" + base64url(SHA-256(label ‖ pubkey))[..12]`
+   *  (§1.2). Provisions a signing-only device Ed25519 key (seed wrapped under a non-extractable AES-GCM
+   *  CryptoKey in IndexedDB) on first call. DISTINCT from the sync-lineage device id (§1.7). */
+  deviceId(): Promise<string>;
+
+  /** This device's signing-only Ed25519 public key (32 bytes). Provisions the key on first call. */
+  devicePublicKey(): Promise<Uint8Array>;
+
+  /** Issue a device certificate for this device (or a supplied `devicePubkey`) chaining to the vault's
+   *  independent trust key (§1.3). Provisions + seals the trust key under HKDF(DEK,…) on first use.
+   *  `caps` is a scope list (canonicalized in wasm). Needs an open session. Persists the sealed trust
+   *  blob and (for this device's own key) the cert. */
+  issueDeviceCert(opts?: { devicePubkey?: Uint8Array; caps?: string[] | string; ttlSeconds?: number }): Promise<DeviceCert>;
+
+  /** The vault trust public key (32 bytes) — the pinned root device certs chain to — or null if no
+   *  cert has been issued on this device yet. */
+  trustPublicKey(): Promise<Uint8Array | null>;
+
+  /** This device's stored certificate (from issueDeviceCert / pairing), or null. */
+  deviceCert(): Promise<DeviceCert | null>;
+
+  /** Verify a device certificate (pure — no DEK). Recompute-and-byte-compare tamper gate,
+   *  `device_id == H(devicePubkey)`, verify_strict under the pinned trust key, and the validity window. */
+  verifyDeviceCert(cert: DeviceCert, expect?: DeviceCertExpectations): Promise<{ ok: boolean; reason?: string }>;
 
   /** Run SQL in the open session against named database `db` (default 'app'; [a-z0-9_-]{1,32} —
    *  each name is its own SQLite file). `params` bind `?` placeholders and require a single
