@@ -291,7 +291,7 @@ footer.site .fine { margin-top: 34px; padding-top: 22px; border-top: 1px solid v
 .doc-head h1 { font-size: clamp(26px, 4vw, 34px); letter-spacing: -.02em; margin: 8px 0 0; color: var(--ink); line-height: 1.15; }
 .doc-head .doc-status { color: var(--dim); font-size: 13px; margin: 10px 0 0; font-family: var(--font-mono); }
 .docs-main .prose { max-width: 760px; }
-.docs-main .prose h1 { display: none; } /* title comes from doc-head */
+.docs-main .prose > h1 { display: none; } /* hide the body's duplicate H1; the title comes from .doc-head */
 .docs-main .prose h2 { scroll-margin-top: 64px; padding-top: 6px; border-top: 1px solid var(--line); }
 .docs-main .prose h3 { scroll-margin-top: 64px; }
 .docs-main .prose a { color: var(--azure-2); text-decoration: none; border-bottom: 1px solid rgba(124,156,255,.25); }
