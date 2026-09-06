@@ -46,6 +46,58 @@ multi-statement scripts are allowed. `open()` also claims a Web Lock so a second
 `vault.persisted`). Envelope, credential id and sync-epoch token persist in IndexedDB
 (`freehold`/`meta`) — all non-secret.
 
+## Preflight
+
+`FreeholdVault.isSupported()` is a fast boolean check for WebAuthn + OPFS. (PRF support itself can only
+be confirmed with a real authenticator, so a genuine capability gap surfaces as a clear error from
+`enroll()` / `unlock()`, never a silent crypto fault deep in the worker.)
+
+## Unlock methods
+
+The DEK is wrapped in an N-slot envelope — any one slot opens the vault, and adding or revoking a slot
+re-wraps the DEK without re-encrypting the database:
+
+```js
+await vault.addPasskey();                 // enroll another passkey slot
+const code = await vault.addRecoveryCode(); // Argon2id recovery slot (show once)
+await vault.enrollConvenience();          // opt-in device-key auto-unlock (this device only)
+const methods = await vault.listMethods(); // [{ kind: 'passkey' | 'recovery' | 'device', ... }]
+await vault.removeMethod(kekId);          // drop a slot; rotateKey() for true eviction + re-encryption
+await vault.needsBackup();                // true until a device-independent method exists
+```
+
+## Sync (server-blind)
+
+Reconcile with your other devices through a relay that only ever sees sealed blobs:
+
+```js
+import { HttpRelay } from '@freehold/db/relay-http';
+
+const relay = new HttpRelay('https://your-relay.example'); // or InMemoryRelay for same-machine tabs
+await vault.sync({ relay });   // version-vector reconcile; every op is signed in the worker
+```
+
+The relay authorizes statelessly — `sync_id` is a commitment to a per-database DEK-derived key, so no
+one can claim your bucket without the key (`docs/relay-auth-design.md`). `vault.syncId()` /
+`vault.relayAuth()` expose the primitives for driving a relay directly.
+
+## Verifiable attestations
+
+Prove a fact without disclosing the data behind it — the vault signs a claim a relying party verifies
+against its **public key**, with no DEK and no PII on the wire:
+
+```js
+const pk  = await vault.vaultPublicKey();
+const att = await vault.attest('profile.over18=true', { audience: 'rp:example', ttlSeconds: 300 });
+// Pure verify (no DEK) — resolves to { ok, reason? }:
+const { ok } = await vault.verifyAttestation(att, {
+  publicKey: pk, claim: 'profile.over18=true', audience: 'rp:example',
+});
+```
+
+Device certificates (per-device identity, `docs/device-trust-design.md`) follow the same discipline:
+`issueDeviceCert()` / `verifyDeviceCert()` / `deviceId()`.
+
 ## License
 
 MIT OR Apache-2.0, at your option.
