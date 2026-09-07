@@ -2,8 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>freehold — passkey-PRF unlock, N-KEK envelope (build-spec M2/M3)</title>
   <style>
+    * { box-sizing: border-box; }
     body { margin: 0; font: 14px/1.6 ui-monospace, monospace; background: #0b1020; color: #e6e9f2; }
     main { max-width: 780px; margin: 0 auto; padding: 28px 20px; }
     h1 { font-size: 16px; font-family: system-ui, sans-serif; }
@@ -15,14 +17,21 @@
     button.primary { background: #2b53c0; border-color: #3f6fe0; }
     button.danger { background: #4a1e2b; border-color: #7e3347; }
     input { font: inherit; background: #0e1530; color: #e6e9f2; border: 1px solid #33477e;
-            border-radius: 8px; padding: 8px; width: 340px; }
+            border-radius: 8px; padding: 8px; width: 100%; max-width: 340px; }
     pre { background: #0e1530; border: 1px solid #24304f; border-radius: 10px; padding: 14px;
-          white-space: pre-wrap; min-height: 64px; }
+          white-space: pre-wrap; word-break: break-word; min-height: 64px; }
     #methods { list-style: none; padding: 0; margin: 6px 0; }
     #methods li { background: #0e1530; border: 1px solid #24304f; border-radius: 8px; padding: 6px 10px;
-                  margin: 4px 0; display: flex; align-items: center; justify-content: space-between; }
+                  margin: 4px 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
     .ok { color: #7fe0a0; } .err { color: #ff8a8a; } .muted { color: #7f8db0; }
-    code.big { display: block; font-size: 18px; letter-spacing: .06em; color: #ffe08a; margin: 8px 0; }
+    code.big { display: block; font-size: 18px; letter-spacing: .06em; color: #ffe08a; margin: 8px 0; word-break: break-all; }
+    /* Mobile: stack controls full-width so nothing overflows a narrow viewport. */
+    @media (max-width: 560px) {
+      main { padding: 20px 14px; }
+      button { width: 100%; margin: 5px 0; }
+      input { max-width: none; }
+      label[for="importFile"] { display: block !important; text-align: center; margin: 5px 0; }
+    }
   </style>
 </head>
 <body>
@@ -130,6 +139,13 @@ security key supporting the WebAuthn <code>prf</code> extension.</pre>
       log(e.message, 'err');
       throw e;
     }
+
+    // Release the OPFS pool when this page is hidden (navigation / bfcache freeze) so another demo on
+    // the same origin can acquire it — otherwise a bfcached page keeps its worker alive holding the
+    // SAH handles and the next page hits createSyncAccessHandle InvalidStateError. Reload on bfcache
+    // restore to re-init cleanly.
+    window.addEventListener('pagehide', () => { try { vault.close(); } catch {} });
+    window.addEventListener('pageshow', (e) => { if (e.persisted) location.reload(); });
 
     async function refreshMethods() {
       const ul = $('methods');

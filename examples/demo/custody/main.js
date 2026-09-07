@@ -16,6 +16,12 @@ function log(msg) {
 
 let vault = null;
 let broker = null;
+
+// Release the OPFS pool when this page is hidden (navigation / bfcache freeze) so another demo on the
+// same origin can acquire it — a bfcached page otherwise keeps its worker holding the SAH handles and
+// the next page hits createSyncAccessHandle InvalidStateError. Reload on bfcache restore to re-init.
+window.addEventListener('pagehide', () => { try { vault && vault.close(); } catch {} });
+window.addEventListener('pageshow', (e) => { if (e.persisted) location.reload(); });
 const apps = {};        // appId → { client, port(broker side kept by broker) }
 let consentResolve = null;
 
