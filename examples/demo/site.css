@@ -317,6 +317,35 @@ footer.site .fine { margin-top: 34px; padding-top: 22px; border-top: 1px solid v
 }
 @media (max-width: 760px) {
   .docs-shell { grid-template-columns: 1fr; }
-  .docs-side { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--line); }
+  .docs-side { position: static; height: auto; max-height: none; border-right: none; border-bottom: 1px solid var(--line); }
   .docs-main { padding: 22px; }
+  .hero { padding: 64px 0 48px; }
+  section.band { padding: 48px 0; }
+}
+
+/* ===================== Accessibility / UX baseline (WCAG 2.2 AA) ===================== */
+:root { --faint: #808ca9; } /* bump low-contrast meta text toward AA on the dark base */
+
+/* Visible keyboard focus on every interactive element (never remove without a replacement). */
+a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible,
+textarea:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--azure); outline-offset: 2px; border-radius: 6px;
+}
+/* Programmatic focus targets (skip-link destination) shouldn't paint a box. */
+#fh-main:focus, [tabindex="-1"]:focus { outline: none; }
+
+/* Comfortable touch targets. */
+.btn, .nav-links a.cta, button { min-height: 44px; }
+
+/* Never let content overflow the viewport horizontally. */
+html, body { overflow-x: hidden; }
+img, svg, video, canvas, table { max-width: 100%; }
+pre, code, .code pre { overflow-wrap: anywhere; }
+
+/* Respect users who prefer reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important; animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important; scroll-behavior: auto !important;
+  }
 }
